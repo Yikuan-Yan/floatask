@@ -15,6 +15,7 @@ src-tauri/target/
 
 # Agent workspace
 .agent/
+.claude/
 
 # OS
 Thumbs.db
