@@ -1,7 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
+
+/* ═══ Platform Detection ═══ */
+const isTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
+const isMobile = !isTauri && typeof navigator !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+// Tauri APIs — loaded only in desktop app, no-op in browser
+let getCurrentWindow=()=>({setSize:async()=>{},setPosition:async()=>{},setAlwaysOnTop:async()=>{},startDragging:async()=>{},startResizeDragging:async()=>{},scaleFactor:async()=>1,outerPosition:async()=>({x:0,y:0}),isVisible:async()=>true,show:async()=>{},hide:async()=>{}});
+let LogicalSize=class{constructor(w,h){this.width=w;this.height=h}};
+let LogicalPosition=class{constructor(x,y){this.x=x;this.y=y}};
+let autostartEnable=async()=>{},autostartDisable=async()=>{},autostartIsEnabled=async()=>false;
+
+if(isTauri){
+  import("@tauri-apps/api/dpi").then(m=>{LogicalSize=m.LogicalSize;LogicalPosition=m.LogicalPosition});
+  import("@tauri-apps/api/window").then(m=>{getCurrentWindow=m.getCurrentWindow});
+  import("@tauri-apps/plugin-autostart").then(m=>{autostartEnable=m.enable;autostartDisable=m.disable;autostartIsEnabled=m.isEnabled}).catch(()=>{});
+}
 
 /* ═══ Storage Abstraction ═══ */
 
@@ -361,7 +374,7 @@ function ConfirmDialog({message,onConfirm,onCancel,theme}){
 /* ═══ Resize Handles ═══ */
 
 const RESIZE_DIR_MAP={n:"North",s:"South",e:"East",w:"West",nw:"NorthWest",ne:"NorthEast",sw:"SouthWest",se:"SouthEast"};
-function ResizeHandles(){const H=6;return <>{["n","s","e","w","nw","ne","sw","se"].map(d=>{const cm={n:"ns-resize",s:"ns-resize",e:"ew-resize",w:"ew-resize",ne:"nesw-resize",nw:"nwse-resize",se:"nwse-resize",sw:"nesw-resize"};const pm={n:{top:0,left:H,right:H,height:H},s:{bottom:0,left:H,right:H,height:H},w:{top:H,bottom:H,left:0,width:H},e:{top:H,bottom:H,right:0,width:H},nw:{top:0,left:0,width:H*2,height:H*2},ne:{top:0,right:0,width:H*2,height:H*2},sw:{bottom:0,left:0,width:H*2,height:H*2},se:{bottom:0,right:0,width:H*2,height:H*2}};return <div key={d} onMouseDown={e=>{e.preventDefault();getCurrentWindow().startResizeDragging(RESIZE_DIR_MAP[d])}} style={{position:"absolute",cursor:cm[d],zIndex:d.length>1?11:10,...pm[d]}}/>})}</>}
+function ResizeHandles(){if(!isTauri)return null;const H=6;return <>{["n","s","e","w","nw","ne","sw","se"].map(d=>{const cm={n:"ns-resize",s:"ns-resize",e:"ew-resize",w:"ew-resize",ne:"nesw-resize",nw:"nwse-resize",se:"nwse-resize",sw:"nesw-resize"};const pm={n:{top:0,left:H,right:H,height:H},s:{bottom:0,left:H,right:H,height:H},w:{top:H,bottom:H,left:0,width:H},e:{top:H,bottom:H,right:0,width:H},nw:{top:0,left:0,width:H*2,height:H*2},ne:{top:0,right:0,width:H*2,height:H*2},sw:{bottom:0,left:0,width:H*2,height:H*2},se:{bottom:0,right:0,width:H*2,height:H*2}};return <div key={d} onMouseDown={e=>{e.preventDefault();getCurrentWindow().startResizeDragging(RESIZE_DIR_MAP[d])}} style={{position:"absolute",cursor:cm[d],zIndex:d.length>1?11:10,...pm[d]}}/>})}</>}
 
 /* ═══ Search Overlay ═══ */
 
@@ -413,18 +426,18 @@ export default function TaskTracker(){
 
   useEffect(()=>{const h=()=>setWinWidth(window.innerWidth);window.addEventListener("resize",h);return()=>window.removeEventListener("resize",h)},[]);
 
-  useEffect(()=>{(async()=>{try{const d=await loadStore();let nextSettings=DEFAULT_SETTINGS;if(d){if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.themeName)setThemeName(d.themeName);if(d.pinned!==undefined)setPinned(d.pinned);if(d.settings)nextSettings={...DEFAULT_SETTINGS,...d.settings}}try{nextSettings={...nextSettings,autostart:await isEnabled()}}catch(e){}setSettings(nextSettings)}catch(e){}setLoaded(true)})()},[]);
+  useEffect(()=>{(async()=>{try{const d=await loadStore();let nextSettings=DEFAULT_SETTINGS;if(d){if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.themeName)setThemeName(d.themeName);if(d.pinned!==undefined)setPinned(d.pinned);if(d.settings)nextSettings={...DEFAULT_SETTINGS,...d.settings}}try{nextSettings={...nextSettings,autostart:await autostartIsEnabled()}}catch(e){}setSettings(nextSettings)}catch(e){}setLoaded(true)})()},[]);
 
   // Sync pinned state to Tauri window — runs on load and on every toggle
-  useEffect(()=>{if(!loaded)return;getCurrentWindow().setAlwaysOnTop(pinned).catch(()=>{})},[pinned,loaded]);
+  useEffect(()=>{if(!loaded||!isTauri)return;getCurrentWindow().setAlwaysOnTop(pinned).catch(()=>{})},[pinned,loaded]);
 
   useEffect(()=>{if(!loaded)return;saveStore({tasks,archived,tags,statuses,themeName,pinned,settings})},[tasks,archived,tags,statuses,themeName,pinned,settings,loaded]);
 
   // Keyboard shortcut: Ctrl+Shift+T toggles collapsed or restores the hidden window
-  useEffect(()=>{const h=e=>{if(e.ctrlKey&&e.shiftKey&&e.key==="T"){e.preventDefault();(async()=>{const appWindow=getCurrentWindow();if(!(await appWindow.isVisible())){await appWindow.show();await resizeWindow(collapsed?COLLAPSED_WINDOW.w:EXPANDED_WINDOW.w,collapsed?COLLAPSED_WINDOW.h:EXPANDED_WINDOW.h);return}if(collapsed)await expandPanel();else await collapsePanel()})()}};document.addEventListener("keydown",h);return()=>document.removeEventListener("keydown",h)},[collapsed]);
+  useEffect(()=>{if(!isTauri)return;const h=e=>{if(e.ctrlKey&&e.shiftKey&&e.key==="T"){e.preventDefault();(async()=>{const appWindow=getCurrentWindow();if(!(await appWindow.isVisible())){await appWindow.show();await resizeWindow(collapsed?COLLAPSED_WINDOW.w:EXPANDED_WINDOW.w,collapsed?COLLAPSED_WINDOW.h:EXPANDED_WINDOW.h);return}if(collapsed)await expandPanel();else await collapsePanel()})()}};document.addEventListener("keydown",h);return()=>document.removeEventListener("keydown",h)},[collapsed]);
 
-  const startMove=(e,toggle)=>{if(e.target.closest("[data-no-drag]"))return;e.preventDefault();const sx=e.clientX,sy=e.clientY;let dragging=false;const onMove=ev=>{if(!dragging&&(Math.abs(ev.clientX-sx)>=3||Math.abs(ev.clientY-sy)>=3)){dragging=true;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);getCurrentWindow().startDragging()}};const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);if(!dragging&&toggle)toggle()};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp)};
-  const resizeWindow=(width,height)=>getCurrentWindow().setSize(new LogicalSize(width,height));
+  const startMove=(e,toggle)=>{if(e.target.closest("[data-no-drag]"))return;if(!isTauri){if(toggle)toggle();return}e.preventDefault();const sx=e.clientX,sy=e.clientY;let dragging=false;const onMove=ev=>{if(!dragging&&(Math.abs(ev.clientX-sx)>=3||Math.abs(ev.clientY-sy)>=3)){dragging=true;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);getCurrentWindow().startDragging()}};const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);if(!dragging&&toggle)toggle()};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp)};
+  const resizeWindow=isTauri?(width,height)=>getCurrentWindow().setSize(new LogicalSize(width,height)):async()=>{};
   const expandPanel=async()=>{const appWindow=getCurrentWindow();collapsedSizeRef.current={w:window.innerWidth,h:window.innerHeight};try{const factor=await appWindow.scaleFactor();const pos=await appWindow.outerPosition();preExpandPos.current={x:Math.round(pos.x/factor),y:Math.round(pos.y/factor)}}catch(e){}const es=expandedSizeRef.current;await resizeWindow(es.w,es.h);setCollapsed(false);setShowOverflow(false);try{const factor=await appWindow.scaleFactor();const pos=await appWindow.outerPosition();const sw=window.screen.availWidth;const sh=window.screen.availHeight;const px=Math.round(pos.x/factor),py=Math.round(pos.y/factor);let nx=px,ny=py;if(px+es.w>sw)nx=Math.max(0,sw-es.w);if(py+es.h>sh)ny=Math.max(0,sh-es.h);if(nx!==px||ny!==py)await appWindow.setPosition(new LogicalPosition(nx,ny))}catch(e){}};
   const collapsePanel=async()=>{expandedSizeRef.current={w:window.innerWidth,h:window.innerHeight};setCollapsed(true);const cs=collapsedSizeRef.current;await resizeWindow(cs.w,cs.h);if(preExpandPos.current){try{await getCurrentWindow().setPosition(new LogicalPosition(preExpandPos.current.x,preExpandPos.current.y))}catch(e){}preExpandPos.current=null}};
 
@@ -454,7 +467,7 @@ export default function TaskTracker(){
   // Export / Import
   const exportData=()=>{const data={tasks,archived,tags,statuses,settings,themeName,version:VER};const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`task-tracker-${today()}.json`;a.click();URL.revokeObjectURL(url)};
   const importData=data=>{if(data.tasks)setTasks(data.tasks);if(data.archived)setArchived(data.archived);if(data.tags)setTags(data.tags);if(data.statuses)setStatuses(data.statuses);if(data.settings)setSettings({...DEFAULT_SETTINGS,...data.settings});if(data.themeName)setThemeName(data.themeName)};
-  const handleSettingsChange=async nextSettings=>{if(nextSettings.autostart!==settings.autostart){if(nextSettings.autostart)await enable();else await disable()}setSettings(nextSettings)};
+  const handleSettingsChange=async nextSettings=>{if(nextSettings.autostart!==settings.autostart){try{if(nextSettings.autostart)await autostartEnable();else await autostartDisable()}catch(e){}}setSettings(nextSettings)};
 
   const activeTasks=tasks.filter(t=>t.status==="ip").sort((a,b)=>a.order-b.order);
   const groupedTasks=statuses.map(s=>s.id).map(sid=>({status:getS(statuses,sid),tasks:tasks.filter(t=>t.status===sid&&(!filterTag||t.tags.includes(filterTag))).sort((a,b)=>a.order-b.order)})).filter(g=>g.tasks.length>0);
@@ -470,6 +483,65 @@ export default function TaskTracker(){
   const cScale=winWidth/COLLAPSED_WINDOW.w;const iconS=Math.max(10,12*cScale);
   const shownActive=showOverflow?activeTasks:activeTasks.slice(0,settings.collapsedMax);const overC=activeTasks.length-settings.collapsedMax;
   const archivable=tasks.filter(t=>t.status==="dn"||t.status==="na").length;
+
+  /* ── Mobile (PWA) ── */
+  if(isMobile||(!isTauri&&!collapsed)){
+    const mfs=isMobile?15:13;const mpad=isMobile?12:10;
+    return(
+      <div style={{width:"100%",height:"100vh",background:theme.panelBg,display:"flex",flexDirection:"column",overflow:"hidden",fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif"}}>
+        <div style={{position:"relative",top:0,left:0,right:0,height:3,background:`linear-gradient(90deg,${theme.accentLeft},${theme.accentRight}80)`,flexShrink:0}}/>
+        {showSearch&&<SearchOverlay tasks={tasks} archived={archived} allTags={tags} statuses={statuses} theme={theme} onClose={()=>setShowSearch(false)}/>}
+
+        {/* Header */}
+        <div style={{padding:`${mpad+4}px ${mpad+4}px ${mpad}px`,flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:mfs+3,fontWeight:600,color:theme.headerText}}>Floatask</span>
+            <span style={{fontSize:mfs-2,color:theme.headerText,opacity:0.5}}>{tasks.length} tasks</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:4}}>
+            <span onClick={()=>window.location.reload()} style={{cursor:"pointer",padding:6,borderRadius:8,display:"flex",alignItems:"center",opacity:0.4}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.4"}>
+              <svg width={mfs} height={mfs} viewBox="0 0 16 16" fill="none" stroke={theme.headerText} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 8a6 6 0 0111.5-2.5M14 2v3.5h-3.5"/><path d="M14 8a6 6 0 01-11.5 2.5M2 14v-3.5h3.5"/></svg>
+            </span>
+            <span onClick={()=>setShowSearch(true)} style={{cursor:"pointer",padding:6,borderRadius:8,display:"flex",alignItems:"center",opacity:0.5}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.5"}>
+              <svg width={mfs} height={mfs} viewBox="0 0 16 16" fill="none" stroke={theme.headerText} strokeWidth="1.5" strokeLinecap="round"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4 4"/></svg>
+            </span>
+          </div>
+        </div>
+
+        {/* Filter */}
+        <div style={{padding:`4px ${mpad+4}px 8px`,flexShrink:0,display:"flex",gap:6,flexWrap:"wrap",borderBottom:`1px solid ${theme.divider}`,WebkitOverflowScrolling:"touch"}}>
+          <span onClick={()=>setFilterTag(null)} style={{fontSize:mfs-3,padding:"4px 12px",borderRadius:99,cursor:"pointer",background:filterTag===null?theme.cardBg:"transparent",color:filterTag===null?theme.textPrimary:theme.textSecondary,border:filterTag===null?`1px solid ${theme.divider}`:"1px solid transparent",fontWeight:500}}>All</span>
+          {tags.map(t=><span key={t.name} onClick={()=>setFilterTag(filterTag===t.name?null:t.name)} style={{fontSize:mfs-3,padding:"4px 12px",borderRadius:99,cursor:"pointer",background:filterTag===t.name?t.color+"18":"transparent",color:filterTag===t.name?t.color:theme.textSecondary,border:`1px solid ${filterTag===t.name?t.color+"35":"transparent"}`,fontWeight:500}}>{t.name}</span>)}
+        </div>
+
+        {/* Content */}
+        <div style={{flex:1,overflowY:"auto",padding:`${mpad}px ${mpad+4}px`,WebkitOverflowScrolling:"touch",userSelect:"text"}}>
+          {!showArchive?groupedTasks.map(group=>(
+            <div key={group.status.id} style={{marginBottom:14}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8,padding:"0 2px"}}><div style={{width:7,height:7,borderRadius:"50%",background:group.status.color,flexShrink:0}}/><span style={{fontSize:mfs-2,color:theme.textSecondary,textTransform:"uppercase",letterSpacing:"0.5px",fontWeight:500}}>{group.status.name}</span><span style={{fontSize:mfs-3,color:theme.textSecondary,opacity:0.5}}>{group.tasks.length}</span></div>
+              {group.tasks.map(task=><TaskCard key={task.id} task={task} allTags={tags} statuses={statuses} theme={theme} onUpdate={handleStatusUpdate} onDelete={deleteTask} onDuplicate={duplicateTask} isDragOver={dragOverId===task.id} onDragStart={setDragFromId} onDragEnter={setDragOverId} onDragEnd={handleDragEnd}/>)}
+            </div>
+          )):(
+            <><div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}><span style={{fontSize:mfs+1,fontWeight:500,color:theme.headerText}}>Archived</span><span style={{fontSize:mfs-2,color:theme.textSecondary}}>{archived.length}</span></div>
+            {archived.length===0&&<p style={{fontSize:mfs-1,color:theme.textSecondary,fontStyle:"italic",opacity:0.6}}>No archived tasks</p>}
+            {archivedByWeek.map(g=><div key={g.week} style={{marginBottom:14}}><div style={{fontSize:mfs-3,color:theme.textSecondary,opacity:0.5,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.5px",fontWeight:500}}>Week of {g.week}</div>{g.tasks.map(t=><ArchiveCard key={t.id} task={t} allTags={tags} statuses={statuses} onRestore={restoreTask} theme={theme}/>)}</div>)}</>
+          )}
+          {addingTask&&!showArchive&&<AddTaskForm allTags={tags} statuses={statuses} onAdd={addTask} onCancel={()=>setAddingTask(false)} theme={theme} defaultStatus={settings.defaultStatus}/>}
+        </div>
+
+        {/* Settings */}
+        {showSettings&&<div style={{padding:`0 ${mpad+4}px 8px`,flexShrink:0,borderTop:`1px solid ${theme.divider}`,maxHeight:300,overflowY:"auto",WebkitOverflowScrolling:"touch"}}><SettingsPanel theme={theme} themeName={themeName} onThemeChange={setThemeName} statuses={statuses} onStatusesChange={setStatuses} tags={tags} onTagsChange={setTags} settings={settings} onSettingsChange={handleSettingsChange} onExport={exportData} onImport={importData}/></div>}
+
+        {/* Bottom */}
+        <div style={{padding:`8px ${mpad+4}px ${isMobile?16:12}px`,flexShrink:0,borderTop:`1px solid ${theme.divider}`,background:theme.panelBg,display:"flex",gap:6,alignItems:"center"}}>
+          <button onClick={()=>{setShowSettings(!showSettings);setShowArchive(false)}} style={{padding:"0 10px",height:isMobile?44:36,borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${showSettings?theme.panelBorder:theme.newTaskBorder}`,background:showSettings?theme.panelBorder+"15":theme.btnBg,color:showSettings?theme.panelBorder:theme.headerText,display:"flex",alignItems:"center",justifyContent:"center"}}><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.1 3.1l1.4 1.4M11.5 11.5l1.4 1.4M3.1 12.9l1.4-1.4M11.5 4.5l1.4-1.4"/></svg></button>
+          <button onClick={()=>{setShowArchive(!showArchive);setShowSettings(false)}} style={{padding:"0 10px",height:isMobile?44:36,borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${showArchive?theme.panelBorder:theme.newTaskBorder}`,background:showArchive?theme.panelBorder+"15":theme.btnBg,color:showArchive?theme.panelBorder:theme.headerText,display:"flex",alignItems:"center",justifyContent:"center",gap:3}}><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="2" width="12" height="4" rx="1"/><path d="M2 6v7a1 1 0 001 1h10a1 1 0 001-1V6"/><path d="M6 9h4"/></svg>{archived.length>0&&<span style={{fontSize:10,opacity:0.6}}>{archived.length}</span>}</button>
+          {!showArchive&&archivable>0&&<button onClick={doArchive} style={{padding:"0 12px",height:isMobile?44:36,borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${theme.newTaskBorder}`,background:theme.btnBg,color:theme.headerText,display:"flex",alignItems:"center",gap:4,fontSize:mfs-2}} onMouseEnter={e=>e.currentTarget.style.borderColor=theme.panelBorder} onMouseLeave={e=>e.currentTarget.style.borderColor=theme.newTaskBorder}>Archive {archivable}</button>}
+          {!showArchive&&<button onClick={()=>setAddingTask(!addingTask)} style={{flex:1,height:isMobile?44:36,borderRadius:10,cursor:"pointer",border:`1px ${addingTask?"solid":"dashed"} ${addingTask?theme.panelBorder:theme.newTaskBorder}`,background:addingTask?theme.panelBorder+"15":"none",color:addingTask?theme.panelBorder:theme.headerText,fontSize:mfs-1,display:"flex",alignItems:"center",justifyContent:"center"}} onMouseEnter={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.panelBorder}} onMouseLeave={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.newTaskBorder}}>+ New</button>}
+        </div>
+      </div>
+    );
+  }
 
   /* ── Minimized ── */
   if(minimized){return(<div style={{width:"100%",height:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}><div onClick={()=>setMinimized(false)} style={{width:36,height:36,background:theme.panelBorder,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",transition:"transform 0.15s",position:"relative"}} onMouseEnter={e=>e.currentTarget.style.transform="scale(1.1)"} onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}><svg width="18" height="18" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="2" stroke="#FFF" strokeWidth="1.3"/><path d="M5 7h6M5 9.5h4" stroke="#FFF" strokeWidth="1" strokeLinecap="round"/></svg>{activeTasks.length>0&&<div style={{position:"absolute",top:-4,right:-4,width:16,height:16,borderRadius:"50%",background:"#378ADD",color:"#FFF",fontSize:9,fontWeight:500,display:"flex",alignItems:"center",justifyContent:"center"}}>{activeTasks.length}</div>}</div></div>)}
