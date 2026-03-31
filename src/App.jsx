@@ -587,8 +587,11 @@ function SearchOverlay({tasks,archived,allTags,statuses,theme,onClose}){
 /* ═══ Main ═══ */
 
 export default function App(){
-  const[session,setSession]=useState(null);const[localMode,setLocalMode]=useState(false);
-  useEffect(()=>{if(!supabase){setLocalMode(true);return}supabase.auth.getSession().then(({data})=>setSession(data.session));const{data:listener}=supabase.auth.onAuthStateChange((_,nextSession)=>setSession(nextSession));return()=>listener.subscription.unsubscribe()},[]);
+  const[session,setSession]=useState(null);const[localMode,setLocalMode]=useState(false);const[authReady,setAuthReady]=useState(false);
+  useEffect(()=>{if(!supabase){setLocalMode(true);setAuthReady(true);return}supabase.auth.getSession().then(({data})=>{setSession(data.session);setAuthReady(true)});const{data:listener}=supabase.auth.onAuthStateChange((_,nextSession)=>setSession(nextSession));return()=>listener.subscription.unsubscribe()},[]);
+  // Resize window for auth screen (needs more space than collapsed 260x160)
+  useEffect(()=>{if(!authReady||!isTauri)return;const needsAuth=!localMode&&!session;tauriReady.then(()=>{if(needsAuth)getCurrentWindow().setSize(new LogicalSize(380,420));else getCurrentWindow().setSize(new LogicalSize(COLLAPSED_WINDOW.w,COLLAPSED_WINDOW.h))}).catch(()=>{})},[authReady,session,localMode]);
+  if(!authReady)return null;
   if(!localMode&&!session)return <AuthScreen onLocal={()=>setLocalMode(true)}/>;
   return <TaskTracker userId={session?.user?.id} userEmail={session?.user?.email||""} localMode={localMode} onSignOut={async()=>{if(!supabase)return;await supabase.auth.signOut()}}/>;
 }
@@ -647,9 +650,18 @@ function TaskTracker({userId,userEmail,localMode,onSignOut}){
   },[userId]);
 
   const startMove=(e,toggle)=>{if(e.target.closest("[data-no-drag]"))return;if(!isTauri){if(toggle)toggle();return}e.preventDefault();const sx=e.clientX,sy=e.clientY;let dragging=false;const onMove=ev=>{if(!dragging&&(Math.abs(ev.clientX-sx)>=3||Math.abs(ev.clientY-sy)>=3)){dragging=true;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);getCurrentWindow().startDragging()}};const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);if(!dragging&&toggle)toggle()};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp)};
-  const resizeWindow=isTauri?(width,height)=>getCurrentWindow().setSize(new LogicalSize(width,height)):async()=>{};
-  const expandPanel=async()=>{const appWindow=getCurrentWindow();collapsedSizeRef.current={w:window.innerWidth,h:window.innerHeight};try{const factor=await appWindow.scaleFactor();const pos=await appWindow.outerPosition();preExpandPos.current={x:Math.round(pos.x/factor),y:Math.round(pos.y/factor)}}catch(e){}const es=expandedSizeRef.current;await resizeWindow(es.w,es.h);setCollapsed(false);setShowOverflow(false);try{const factor=await appWindow.scaleFactor();const pos=await appWindow.outerPosition();const sw=window.screen.availWidth;const sh=window.screen.availHeight;const px=Math.round(pos.x/factor),py=Math.round(pos.y/factor);let nx=px,ny=py;if(px+es.w>sw)nx=Math.max(0,sw-es.w);if(py+es.h>sh)ny=Math.max(0,sh-es.h);if(nx!==px||ny!==py)await appWindow.setPosition(new LogicalPosition(nx,ny))}catch(e){}};
-  const collapsePanel=async()=>{expandedSizeRef.current={w:window.innerWidth,h:window.innerHeight};setCollapsed(true);const cs=collapsedSizeRef.current;await resizeWindow(cs.w,cs.h);if(preExpandPos.current){try{await getCurrentWindow().setPosition(new LogicalPosition(preExpandPos.current.x,preExpandPos.current.y))}catch(e){}preExpandPos.current=null}};
+  const resizeWindow=isTauri?async(width,height)=>{await tauriReady;return getCurrentWindow().setSize(new LogicalSize(width,height))}:async()=>{};
+  const expandPanel=async()=>{const appWindow=getCurrentWindow();
+    // Save collapsed size — if overflow is open, use the pre-overflow height instead
+    const savedH=preOverflowH.current||window.innerHeight;
+    collapsedSizeRef.current={w:window.innerWidth,h:savedH};
+    preOverflowH.current=null;setShowOverflow(false);
+    try{const factor=await appWindow.scaleFactor();const pos=await appWindow.outerPosition();preExpandPos.current={x:Math.round(pos.x/factor),y:Math.round(pos.y/factor)}}catch(e){}
+    const es=expandedSizeRef.current;await resizeWindow(es.w,es.h);setCollapsed(false);
+    try{const factor=await appWindow.scaleFactor();const pos=await appWindow.outerPosition();const sw=window.screen.availWidth;const sh=window.screen.availHeight;const px=Math.round(pos.x/factor),py=Math.round(pos.y/factor);let nx=px,ny=py;if(px+es.w>sw)nx=Math.max(0,sw-es.w);if(py+es.h>sh)ny=Math.max(0,sh-es.h);if(nx!==px||ny!==py)await appWindow.setPosition(new LogicalPosition(nx,ny))}catch(e){}};
+  const collapsePanel=async()=>{expandedSizeRef.current={w:window.innerWidth,h:window.innerHeight};setCollapsed(true);
+    const cs=collapsedSizeRef.current;await resizeWindow(cs.w,cs.h);
+    if(preExpandPos.current){try{await getCurrentWindow().setPosition(new LogicalPosition(preExpandPos.current.x,preExpandPos.current.y))}catch(e){}preExpandPos.current=null}};
 
   const doArchive=()=>{const toA=tasks.filter(t=>t.status==="dn"||t.status==="na").map(t=>({...t,archivedAt:today()}));if(!toA.length)return;setArchived([...toA,...archived]);setTasks(tasks.filter(t=>t.status!=="dn"&&t.status!=="na"))};
   const restoreTask=id=>{const t=archived.find(a=>a.id===id);if(!t)return;const{archivedAt,...rest}=t;setTasks([...tasks,rest]);setArchived(archived.filter(a=>a.id!==id))};
