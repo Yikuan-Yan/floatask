@@ -12,6 +12,7 @@ pub fn run() {
             Some(vec![]),
         ))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             // Build tray menu
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;

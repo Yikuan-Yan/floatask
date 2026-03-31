@@ -18,6 +18,8 @@
     "core:window:allow-close",
     "core:window:allow-is-visible",
     "opener:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled"

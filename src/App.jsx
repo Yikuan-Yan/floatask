@@ -5,15 +5,21 @@ const isTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
 const isMobile = !isTauri && typeof navigator !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
 // Tauri APIs — loaded only in desktop app, no-op in browser
-let getCurrentWindow=()=>({setSize:async()=>{},setPosition:async()=>{},setAlwaysOnTop:async()=>{},startDragging:async()=>{},startResizeDragging:async()=>{},scaleFactor:async()=>1,outerPosition:async()=>({x:0,y:0}),isVisible:async()=>true,show:async()=>{},hide:async()=>{}});
+let getCurrentWindow=()=>({setSize:async()=>{},setPosition:async()=>{},setAlwaysOnTop:async()=>{},startDragging:async()=>{},startResizeDragging:async()=>{},scaleFactor:async()=>1,outerPosition:async()=>({x:0,y:0}),isVisible:async()=>true,show:async()=>{},hide:async()=>{},setFocus:async()=>{}});
 let LogicalSize=class{constructor(w,h){this.width=w;this.height=h}};
 let LogicalPosition=class{constructor(x,y){this.x=x;this.y=y}};
 let autostartEnable=async()=>{},autostartDisable=async()=>{},autostartIsEnabled=async()=>false;
+let registerShortcut=async()=>{},unregisterShortcut=async()=>{};
 
+// tauriReady resolves when all Tauri APIs are loaded
+let tauriReady=Promise.resolve();
 if(isTauri){
-  import("@tauri-apps/api/dpi").then(m=>{LogicalSize=m.LogicalSize;LogicalPosition=m.LogicalPosition});
-  import("@tauri-apps/api/window").then(m=>{getCurrentWindow=m.getCurrentWindow});
-  import("@tauri-apps/plugin-autostart").then(m=>{autostartEnable=m.enable;autostartDisable=m.disable;autostartIsEnabled=m.isEnabled}).catch(()=>{});
+  tauriReady=Promise.all([
+    import("@tauri-apps/api/dpi").then(m=>{LogicalSize=m.LogicalSize;LogicalPosition=m.LogicalPosition}),
+    import("@tauri-apps/api/window").then(m=>{getCurrentWindow=m.getCurrentWindow}),
+    import("@tauri-apps/plugin-autostart").then(m=>{autostartEnable=m.enable;autostartDisable=m.disable;autostartIsEnabled=m.isEnabled}).catch(()=>{}),
+    import("@tauri-apps/plugin-global-shortcut").then(m=>{registerShortcut=m.register;unregisterShortcut=m.unregister}).catch(()=>{})
+  ]);
 }
 
 /* ═══ Storage Abstraction ═══ */
@@ -441,15 +447,18 @@ export default function TaskTracker(){
 
   useEffect(()=>{const h=()=>setWinWidth(window.innerWidth);window.addEventListener("resize",h);return()=>window.removeEventListener("resize",h)},[]);
 
-  useEffect(()=>{(async()=>{try{const d=await loadStore();let nextSettings=DEFAULT_SETTINGS;if(d){if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.themeName)setThemeName(d.themeName);if(d.pinned!==undefined)setPinned(d.pinned);if(d.settings)nextSettings={...DEFAULT_SETTINGS,...d.settings}}try{nextSettings={...nextSettings,autostart:await autostartIsEnabled()}}catch(e){}setSettings(nextSettings)}catch(e){}setLoaded(true)})()},[]);
+  useEffect(()=>{(async()=>{await tauriReady;try{const d=await loadStore();let nextSettings=DEFAULT_SETTINGS;if(d){if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.themeName)setThemeName(d.themeName);if(d.pinned!==undefined)setPinned(d.pinned);if(d.settings)nextSettings={...DEFAULT_SETTINGS,...d.settings}}try{nextSettings={...nextSettings,autostart:await autostartIsEnabled()}}catch(e){}setSettings(nextSettings)}catch(e){}setLoaded(true)})()},[]);
 
   // Sync pinned state to Tauri window — runs on load and on every toggle
-  useEffect(()=>{if(!loaded||!isTauri)return;getCurrentWindow().setAlwaysOnTop(pinned).catch(()=>{})},[pinned,loaded]);
+  useEffect(()=>{if(!loaded||!isTauri)return;tauriReady.then(()=>getCurrentWindow().setAlwaysOnTop(pinned)).catch(()=>{})},[pinned,loaded]);
 
   useEffect(()=>{if(!loaded)return;saveStore({tasks,archived,tags,statuses,themeName,pinned,settings})},[tasks,archived,tags,statuses,themeName,pinned,settings,loaded]);
 
-  // Keyboard shortcut: Ctrl+Shift+T toggles collapsed or restores the hidden window
-  useEffect(()=>{if(!isTauri)return;const h=e=>{if(e.ctrlKey&&e.shiftKey&&e.key==="T"){e.preventDefault();(async()=>{const appWindow=getCurrentWindow();if(!(await appWindow.isVisible())){await appWindow.show();await resizeWindow(collapsed?COLLAPSED_WINDOW.w:EXPANDED_WINDOW.w,collapsed?COLLAPSED_WINDOW.h:EXPANDED_WINDOW.h);return}if(collapsed)await expandPanel();else await collapsePanel()})()}};document.addEventListener("keydown",h);return()=>document.removeEventListener("keydown",h)},[collapsed]);
+  // Track latest collapsed state for global shortcut callback
+  const collapsedRef=useRef(collapsed);useEffect(()=>{collapsedRef.current=collapsed},[collapsed]);
+
+  // Global shortcut: Ctrl+Shift+T works even when window is hidden (Tauri only)
+  useEffect(()=>{if(!isTauri)return;let registered=false;const SHORTCUT="CmdOrCtrl+Shift+T";tauriReady.then(async()=>{await registerShortcut(SHORTCUT,async()=>{const appWindow=getCurrentWindow();const visible=await appWindow.isVisible();if(!visible){await appWindow.show();await appWindow.setFocus();return}if(collapsedRef.current)await expandPanel();else await collapsePanel()});registered=true}).catch(()=>{});return()=>{if(registered)tauriReady.then(()=>unregisterShortcut(SHORTCUT)).catch(()=>{})}},[]);
 
   const startMove=(e,toggle)=>{if(e.target.closest("[data-no-drag]"))return;if(!isTauri){if(toggle)toggle();return}e.preventDefault();const sx=e.clientX,sy=e.clientY;let dragging=false;const onMove=ev=>{if(!dragging&&(Math.abs(ev.clientX-sx)>=3||Math.abs(ev.clientY-sy)>=3)){dragging=true;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);getCurrentWindow().startDragging()}};const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);if(!dragging&&toggle)toggle()};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp)};
   const resizeWindow=isTauri?(width,height)=>getCurrentWindow().setSize(new LogicalSize(width,height)):async()=>{};
@@ -570,7 +579,7 @@ export default function TaskTracker(){
         <ResizeHandles/>
         <div style={{position:"absolute",top:0,left:0,right:0,height:Math.max(2,3*cScale),background:activeTasks.length>0?`linear-gradient(90deg,${theme.accentLeft},${theme.accentLeft}60)`:theme.divider}}/>
         <div style={{position:"absolute",top:Math.max(4,6*cScale),right:Math.max(6,8*cScale),display:"flex",gap:Math.max(2,4*cScale),zIndex:12}}>
-          <span data-no-drag onClick={async e=>{e.stopPropagation();const nextPinned=!pinned;setPinned(nextPinned);await getCurrentWindow().setAlwaysOnTop(nextPinned)}} style={{width:iconS+6,height:iconS+6,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:4,background:pinned?theme.panelBorder+"20":"transparent"}} onMouseEnter={e=>{if(!pinned)e.currentTarget.style.background=theme.panelBorder+"10"}} onMouseLeave={e=>{e.currentTarget.style.background=pinned?theme.panelBorder+"20":"transparent"}}><svg width={iconS} height={iconS} viewBox="0 0 16 16" fill="none" stroke={pinned?theme.panelBorder:theme.headerText} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" style={{opacity:pinned?1:0.5,transform:pinned?"rotate(0deg)":"rotate(45deg)",transition:"transform 0.2s"}}><path d="M5 2L11 2L12 7L10 9L10 14L6 14L6 9L4 7Z" fill={pinned?theme.panelBorder+"30":"none"}/></svg></span>
+          <span data-no-drag onClick={e=>{e.stopPropagation();setPinned(!pinned)}} style={{width:iconS+6,height:iconS+6,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:4,background:pinned?theme.panelBorder+"20":"transparent"}} onMouseEnter={e=>{if(!pinned)e.currentTarget.style.background=theme.panelBorder+"10"}} onMouseLeave={e=>{e.currentTarget.style.background=pinned?theme.panelBorder+"20":"transparent"}}><svg width={iconS} height={iconS} viewBox="0 0 16 16" fill="none" stroke={pinned?theme.panelBorder:theme.headerText} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" style={{opacity:pinned?1:0.5,transform:pinned?"rotate(0deg)":"rotate(45deg)",transition:"transform 0.2s"}}><path d="M5 2L11 2L12 7L10 9L10 14L6 14L6 9L4 7Z" fill={pinned?theme.panelBorder+"30":"none"}/></svg></span>
           <span data-no-drag onClick={async e=>{e.stopPropagation();await getCurrentWindow().hide()}} style={{width:iconS+6,height:iconS+6,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:4}} onMouseEnter={e=>e.currentTarget.style.background=theme.panelBorder+"10"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}><svg width={iconS} height={iconS} viewBox="0 0 16 16" fill="none" stroke={theme.headerText} strokeWidth="1.3" strokeLinecap="round" style={{opacity:0.5}}><path d="M4 4L12 12M12 4L4 12"/></svg></span>
         </div>
         <div onMouseDown={e=>startMove(e,expandPanel)} style={{cursor:"grab"}}>
