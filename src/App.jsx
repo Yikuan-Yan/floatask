@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { supabase } from "./supabase";
 
 /* ═══ Platform Detection ═══ */
 const isTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
@@ -26,8 +27,7 @@ if(isTauri){
 
 const STORE_KEY = "floatask-data";
 
-async function loadStore() {
-  // Try window.storage (Claude.ai artifacts) first, then localStorage
+async function loadLocalStore() {
   try {
     if (window.storage) {
       const r = await window.storage.get(STORE_KEY);
@@ -41,10 +41,136 @@ async function loadStore() {
   return null;
 }
 
-async function saveStore(data) {
+async function saveLocalStore(data) {
   const json = JSON.stringify(data);
   try { if (window.storage) await window.storage.set(STORE_KEY, json); } catch (e) {}
   try { localStorage.setItem(STORE_KEY, json); } catch (e) {}
+}
+
+function makeEmptyStore() {
+  return {
+    tasks: [],
+    archived: [],
+    tags: DEFAULT_TAGS,
+    statuses: DEFAULT_STATUSES,
+    settings: DEFAULT_SETTINGS,
+    themeName: "Ocean blue",
+  };
+}
+
+function mapTaskToRow(task, userId, isArchived) {
+  return {
+    id: task.id,
+    user_id: userId,
+    name: task.name,
+    status: task.status,
+    tags: task.tags || [],
+    short_note: task.shortNote || "",
+    full_note: task.fullNote || "",
+    sort_order: task.order ?? 0,
+    created_at: task.createdAt || null,
+    started_at: task.startedAt || null,
+    completed_at: task.completedAt || null,
+    archived_at: isArchived ? task.archivedAt || task.completedAt || today() : null,
+    is_archived: isArchived,
+  };
+}
+
+function mapRowToTask(row) {
+  const task = {
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    tags: row.tags || [],
+    shortNote: row.short_note || "",
+    fullNote: row.full_note || "",
+    order: row.sort_order ?? 0,
+    createdAt: row.created_at || "",
+    startedAt: row.started_at || "",
+    completedAt: row.completed_at || "",
+    updatedAt: row.updated_at || "",
+  };
+  return row.is_archived ? { ...task, archivedAt: row.archived_at || row.completed_at || "" } : task;
+}
+
+function buildCloudStore(taskRows, settingsRow, localData) {
+  const tasks = [];
+  const archived = [];
+  for (const row of taskRows || []) {
+    const task = mapRowToTask(row);
+    if (row.is_archived) archived.push(task);
+    else tasks.push(task);
+  }
+  return {
+    tasks,
+    archived,
+    tags: settingsRow?.tags || DEFAULT_TAGS,
+    statuses: settingsRow?.statuses || DEFAULT_STATUSES,
+    settings: { ...DEFAULT_SETTINGS, ...(settingsRow?.settings || {}) },
+    themeName: settingsRow?.theme_name || "Ocean blue",
+    pinned: localData?.pinned ?? false,
+  };
+}
+
+function hasStoredTaskData(data) {
+  return !!(data && ((data.tasks?.length ?? 0) > 0 || (data.archived?.length ?? 0) > 0));
+}
+
+async function loadStore(userId) {
+  const localData = await loadLocalStore();
+  if (!userId || !supabase) return { data: localData };
+  const [{ data: taskRows, error: taskError }, { data: settingsRow, error: settingsError }] = await Promise.all([
+    supabase.from("tasks").select("*").eq("user_id", userId).order("sort_order", { ascending: true }),
+    supabase.from("user_settings").select("*").eq("user_id", userId).maybeSingle(),
+  ]);
+  if (taskError) throw taskError;
+  if (settingsError) throw settingsError;
+
+  const hasCloudData = (taskRows?.length ?? 0) > 0 || !!settingsRow;
+  if (!hasCloudData && hasStoredTaskData(localData)) {
+    return { data: localData, shouldPromptImport: true, localData };
+  }
+
+  const data = hasCloudData ? buildCloudStore(taskRows, settingsRow, localData) : makeEmptyStore();
+  await saveLocalStore(data);
+  return { data };
+}
+
+async function saveStore(data, userId) {
+  await saveLocalStore(data);
+  if (!userId || !supabase) return;
+
+  const taskRows = [
+    ...(data.tasks || []).map(task => mapTaskToRow(task, userId, false)),
+    ...(data.archived || []).map(task => mapTaskToRow(task, userId, true)),
+  ];
+  const settingsRow = {
+    user_id: userId,
+    theme_name: data.themeName || "Ocean blue",
+    settings: data.settings || DEFAULT_SETTINGS,
+    statuses: data.statuses || DEFAULT_STATUSES,
+    tags: data.tags || DEFAULT_TAGS,
+  };
+
+  const { data: remoteRows, error: remoteError } = await supabase.from("tasks").select("id").eq("user_id", userId);
+  if (remoteError) throw remoteError;
+
+  const localIds = new Set(taskRows.map(row => row.id));
+  const missingIds = (remoteRows || []).map(row => row.id).filter(id => !localIds.has(id));
+  if (missingIds.length) {
+    const { error } = await supabase.from("tasks").delete().eq("user_id", userId).in("id", missingIds);
+    if (error) throw error;
+  }
+  if (taskRows.length) {
+    const { error } = await supabase.from("tasks").upsert(taskRows, { onConflict: "id,user_id" });
+    if (error) throw error;
+  } else {
+    const { error } = await supabase.from("tasks").delete().eq("user_id", userId);
+    if (error) throw error;
+  }
+
+  const { error: settingsUpsertError } = await supabase.from("user_settings").upsert(settingsRow, { onConflict: "user_id" });
+  if (settingsUpsertError) throw settingsUpsertError;
 }
 
 /* ═══ Constants ═══ */
@@ -174,7 +300,29 @@ function Toggle({value,onChange,theme}){
   </div>);
 }
 
-function SettingsPanel({theme,themeName,onThemeChange,statuses,onStatusesChange,tags,onTagsChange,settings,onSettingsChange,onExport,onImport,theme:th}){
+function AuthScreen({onLocal}){
+  const theme=THEMES["Ocean blue"];const[mode,setMode]=useState("login");const[email,setEmail]=useState("");const[password,setPassword]=useState("");const[error,setError]=useState("");const[message,setMessage]=useState("");const[loading,setLoading]=useState(false);
+  const submit=async()=>{if(!supabase){setError("Supabase is not configured.");return}if(!email.trim()||!password){setError("Please enter your email and password.");return}setLoading(true);setError("");setMessage("");try{if(mode==="login"){const{error:authError}=await supabase.auth.signInWithPassword({email:email.trim(),password});if(authError)throw authError}else{const{data,error:authError}=await supabase.auth.signUp({email:email.trim(),password});if(authError)throw authError;setMessage(data.session?"Account created.":"Account created. Check your email to confirm your account.")}}catch(e){setError(e.message||"Authentication failed.")}setLoading(false)};
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24,background:`linear-gradient(180deg,${theme.panelBg},#FFFFFF)`}}>
+      <div style={{width:"100%",maxWidth:380,background:theme.cardBg,border:`1.5px solid ${theme.panelBorder}`,borderRadius:18,padding:24,boxShadow:"0 16px 40px rgba(12,68,124,0.12)"}}>
+        <div style={{display:"flex",gap:6,marginBottom:18}}>
+          {["login","signup"].map(tab=><button key={tab} onClick={()=>{setMode(tab);setError("");setMessage("")}} style={{flex:1,padding:"9px 12px",borderRadius:999,cursor:"pointer",border:`1px solid ${mode===tab?theme.panelBorder:theme.inputBorder}`,background:mode===tab?theme.panelBorder:"transparent",color:mode===tab?theme.btnPrimaryText:theme.textSecondary,fontSize:12,fontWeight:600,textTransform:"capitalize"}}>{tab==="signup"?"Sign up":"Log in"}</button>)}
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" style={{width:"100%",boxSizing:"border-box",fontSize:13,padding:"10px 12px",borderRadius:10,border:`1px solid ${theme.inputBorder}`,background:theme.inputBg,color:theme.textPrimary}}/>
+          <input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" type="password" autoComplete={mode==="login"?"current-password":"new-password"} style={{width:"100%",boxSizing:"border-box",fontSize:13,padding:"10px 12px",borderRadius:10,border:`1px solid ${theme.inputBorder}`,background:theme.inputBg,color:theme.textPrimary}}/>
+          {error&&<div style={{fontSize:12,color:theme.btnDangerText,background:theme.btnDangerBg,borderRadius:8,padding:"8px 10px"}}>{error}</div>}
+          {message&&<div style={{fontSize:12,color:theme.headerText,background:theme.panelBg,borderRadius:8,padding:"8px 10px"}}>{message}</div>}
+          <button onClick={submit} disabled={loading} style={{padding:"10px 12px",borderRadius:10,cursor:loading?"default":"pointer",border:"none",background:theme.btnPrimaryBg,color:theme.btnPrimaryText,fontSize:13,fontWeight:600,opacity:loading?0.7:1}}>{loading?(mode==="login"?"Logging in...":"Signing up..."):(mode==="login"?"Log in":"Create account")}</button>
+          <button onClick={onLocal} style={{padding:"10px 12px",borderRadius:10,cursor:"pointer",border:`1px solid ${theme.inputBorder}`,background:"transparent",color:theme.textSecondary,fontSize:12,fontWeight:500}}>Continue in local mode (not syncing)</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsPanel({theme,themeName,onThemeChange,statuses,onStatusesChange,tags,onTagsChange,settings,onSettingsChange,onExport,onImport,userEmail,localMode,onSignOut,theme:th}){
   const fileRef=useRef(null);
   const handleFile=e=>{const f=e.target.files?.[0];if(!f){alert("No file selected");return}const r=new FileReader();r.onload=ev=>{try{const data=JSON.parse(ev.target.result);onImport(data)}catch(err){alert("Invalid file: "+err.message)}};r.onerror=()=>alert("Failed to read file");r.readAsText(f);e.target.value=""};
   return(
@@ -227,6 +375,10 @@ function SettingsPanel({theme,themeName,onThemeChange,statuses,onStatusesChange,
           <input ref={fileRef} type="file" accept=".json" onChange={handleFile} style={{display:"none"}}/>
         </div>
         <a href={`${REPO_URL}/releases`} target="_blank" rel="noopener noreferrer" onClick={e=>{e.stopPropagation();e.preventDefault();import("@tauri-apps/plugin-opener").then(m=>m.openUrl(`${REPO_URL}/releases`)).catch(()=>window.open(`${REPO_URL}/releases`,"_blank"))}} style={{fontSize:10,color:theme.textSecondary,opacity:0.5,margin:"8px 0 0",display:"block",textDecoration:"none",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.opacity="0.8"} onMouseLeave={e=>e.currentTarget.style.opacity="0.5"}>Floatask v{VER}</a>
+      </div>
+      <div style={{borderTop:`0.5px solid ${theme.divider}`,paddingTop:8,marginTop:8}}>
+        <p style={{fontSize:11,fontWeight:500,margin:"0 0 8px",color:theme.textSecondary}}>Account</p>
+        {userEmail?<><div style={{fontSize:11,color:theme.textPrimary,marginBottom:8,wordBreak:"break-all"}}>{userEmail}</div><button onClick={onSignOut} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.btnText}}>Log out</button></>:<div style={{fontSize:11,color:localMode?theme.textSecondary:theme.textPrimary}}>{localMode?"Local mode - not syncing":"Not signed in"}</div>}
       </div>
     </div>
   );
@@ -377,15 +529,15 @@ function ConfirmDialog({message,onConfirm,onCancel,theme,confirmLabel="Delete",c
   </div>);
 }
 
-function ImportDialog({data,onReplace,onMerge,onCancel,theme}){
+function ImportDialog({data,onReplace,onMerge,onCancel,theme,title="Import Data",description,replaceLabel="Replace all data",replaceHint="Clear current data and import",mergeLabel="Merge",mergeHint="Add imported tasks to existing data"}){
   const tc=data.tasks?data.tasks.length:0;const ac=data.archived?data.archived.length:0;
   return(<div style={{position:"fixed",inset:0,zIndex:10002,background:"rgba(0,0,0,0.25)",display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onCancel}>
     <div onClick={e=>e.stopPropagation()} style={{background:theme.cardBg,border:`1px solid ${theme.inputBorder}`,borderRadius:12,padding:"20px 24px",minWidth:260,maxWidth:340,boxShadow:"0 8px 32px rgba(0,0,0,0.18)"}}>
-      <p style={{fontSize:14,fontWeight:600,color:theme.textPrimary,margin:"0 0 8px"}}>Import Data</p>
-      <p style={{fontSize:12,color:theme.textSecondary,margin:"0 0 16px",lineHeight:1.5}}>Found {tc} tasks{ac>0?` and ${ac} archived`:""}{data.themeName?`, theme: ${data.themeName}`:""}</p>
+      <p style={{fontSize:14,fontWeight:600,color:theme.textPrimary,margin:"0 0 8px"}}>{title}</p>
+      <p style={{fontSize:12,color:theme.textSecondary,margin:"0 0 16px",lineHeight:1.5}}>{description||`Found ${tc} tasks${ac>0?` and ${ac} archived`:""}${data.themeName?`, theme: ${data.themeName}`:""}`}</p>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        <button onClick={onReplace} style={{fontSize:12,padding:"10px 16px",borderRadius:8,cursor:"pointer",background:theme.btnPrimaryBg,border:"none",color:theme.btnPrimaryText,fontWeight:500,textAlign:"left"}}>Replace all data<br/><span style={{fontSize:11,opacity:0.8,fontWeight:400}}>Clear current data and import</span></button>
-        <button onClick={onMerge} style={{fontSize:12,padding:"10px 16px",borderRadius:8,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.textPrimary,fontWeight:500,textAlign:"left"}}>Merge<br/><span style={{fontSize:11,opacity:0.6,fontWeight:400}}>Add imported tasks to existing data</span></button>
+        <button onClick={onReplace} style={{fontSize:12,padding:"10px 16px",borderRadius:8,cursor:"pointer",background:theme.btnPrimaryBg,border:"none",color:theme.btnPrimaryText,fontWeight:500,textAlign:"left"}}>{replaceLabel}<br/><span style={{fontSize:11,opacity:0.8,fontWeight:400}}>{replaceHint}</span></button>
+        <button onClick={onMerge} style={{fontSize:12,padding:"10px 16px",borderRadius:8,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.textPrimary,fontWeight:500,textAlign:"left"}}>{mergeLabel}<br/><span style={{fontSize:11,opacity:0.6,fontWeight:400}}>{mergeHint}</span></button>
         <button onClick={onCancel} style={{fontSize:12,padding:"8px 16px",borderRadius:8,cursor:"pointer",background:"transparent",border:"none",color:theme.textSecondary,textAlign:"center"}}>Cancel</button>
       </div>
     </div>
@@ -434,31 +586,65 @@ function SearchOverlay({tasks,archived,allTags,statuses,theme,onClose}){
 
 /* ═══ Main ═══ */
 
-export default function TaskTracker(){
-  const[tasks,setTasks]=useState(INITIAL_TASKS);const[archived,setArchived]=useState([]);const[tags,setTags]=useState(DEFAULT_TAGS);const[statuses,setStatuses]=useState(DEFAULT_STATUSES);
+export default function App(){
+  const[session,setSession]=useState(null);const[localMode,setLocalMode]=useState(false);
+  useEffect(()=>{if(!supabase){setLocalMode(true);return}supabase.auth.getSession().then(({data})=>setSession(data.session));const{data:listener}=supabase.auth.onAuthStateChange((_,nextSession)=>setSession(nextSession));return()=>listener.subscription.unsubscribe()},[]);
+  if(!localMode&&!session)return <AuthScreen onLocal={()=>setLocalMode(true)}/>;
+  return <TaskTracker userId={session?.user?.id} userEmail={session?.user?.email||""} localMode={localMode} onSignOut={async()=>{if(!supabase)return;await supabase.auth.signOut()}}/>;
+}
+
+function TaskTracker({userId,userEmail,localMode,onSignOut}){
+  const[tasks,setTasks]=useState(userId?[]:INITIAL_TASKS);const[archived,setArchived]=useState([]);const[tags,setTags]=useState(DEFAULT_TAGS);const[statuses,setStatuses]=useState(DEFAULT_STATUSES);
   const[collapsed,setCollapsed]=useState(true);const[loaded,setLoaded]=useState(false);const[showSettings,setShowSettings]=useState(false);const[showArchive,setShowArchive]=useState(false);
   const[filterTag,setFilterTag]=useState(null);const[themeName,setThemeName]=useState("Ocean blue");const[pinned,setPinned]=useState(false);const[minimized,setMinimized]=useState(false);
-  const[showOverflow,setShowOverflow]=useState(false);const[showSearch,setShowSearch]=useState(false);const[settings,setSettings]=useState(DEFAULT_SETTINGS);const[addingTask,setAddingTask]=useState(false);const[importPending,setImportPending]=useState(null);
-  const panelRef=useRef(null);const preExpandPos=useRef(null);const collapsedSizeRef=useRef({...COLLAPSED_WINDOW});const expandedSizeRef=useRef({...EXPANDED_WINDOW});const preOverflowH=useRef(null);const theme=THEMES[themeName]||THEMES["Ocean blue"];
+  const[showOverflow,setShowOverflow]=useState(false);const[showSearch,setShowSearch]=useState(false);const[settings,setSettings]=useState(DEFAULT_SETTINGS);const[addingTask,setAddingTask]=useState(false);const[importPending,setImportPending]=useState(null);const[cloudImportPending,setCloudImportPending]=useState(null);
+  const panelRef=useRef(null);const preExpandPos=useRef(null);const collapsedSizeRef=useRef({...COLLAPSED_WINDOW});const expandedSizeRef=useRef({...EXPANDED_WINDOW});const preOverflowH=useRef(null);const saveTimerRef=useRef(null);const pendingWriteRef=useRef(new Set());const theme=THEMES[themeName]||THEMES["Ocean blue"];
   const[winWidth,setWinWidth]=useState(window.innerWidth||COLLAPSED_WINDOW.w);
 
   // Drag reorder state
   const[dragFromId,setDragFromId]=useState(null);const[dragOverId,setDragOverId]=useState(null);
 
+  const markPendingWrite=ids=>{ids.forEach(id=>pendingWriteRef.current.add(id));window.setTimeout(()=>ids.forEach(id=>pendingWriteRef.current.delete(id)),2000)};
+  const syncToCloud=async data=>{if(!userId||!supabase)return;const ids=[...(data.tasks||[]).map(task=>`task:${task.id}`),...(data.archived||[]).map(task=>`task:${task.id}`),"settings"];markPendingWrite(ids);await saveStore(data,userId)};
+  const shouldUseRemoteTask=(currentTask,nextTask)=>!currentTask||!currentTask.updatedAt||!nextTask.updatedAt||new Date(nextTask.updatedAt).getTime()>=new Date(currentTask.updatedAt).getTime();
+
   useEffect(()=>{const h=()=>setWinWidth(window.innerWidth);window.addEventListener("resize",h);return()=>window.removeEventListener("resize",h)},[]);
 
-  useEffect(()=>{(async()=>{await tauriReady;try{const d=await loadStore();let nextSettings=DEFAULT_SETTINGS;if(d){if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.themeName)setThemeName(d.themeName);if(d.pinned!==undefined)setPinned(d.pinned);if(d.settings)nextSettings={...DEFAULT_SETTINGS,...d.settings}}try{nextSettings={...nextSettings,autostart:await autostartIsEnabled()}}catch(e){}setSettings(nextSettings)}catch(e){}setLoaded(true)})()},[]);
+  useEffect(()=>{let cancelled=false;(async()=>{await tauriReady;try{const result=await loadStore(userId);if(cancelled)return;const d=result?.data;let nextSettings=DEFAULT_SETTINGS;if(d){if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.themeName)setThemeName(d.themeName);if(d.pinned!==undefined)setPinned(d.pinned);if(d.settings)nextSettings={...DEFAULT_SETTINGS,...d.settings}}setCloudImportPending(result?.shouldPromptImport?result.localData:null);try{nextSettings={...nextSettings,autostart:await autostartIsEnabled()}}catch(e){}setSettings(nextSettings)}catch(e){}if(!cancelled)setLoaded(true)})();return()=>{cancelled=true;if(saveTimerRef.current)clearTimeout(saveTimerRef.current)}},[userId]);
 
   // Sync pinned state to Tauri window — runs on load and on every toggle
   useEffect(()=>{if(!loaded||!isTauri)return;tauriReady.then(()=>getCurrentWindow().setAlwaysOnTop(pinned)).catch(()=>{})},[pinned,loaded]);
 
-  useEffect(()=>{if(!loaded)return;saveStore({tasks,archived,tags,statuses,themeName,pinned,settings})},[tasks,archived,tags,statuses,themeName,pinned,settings,loaded]);
+  useEffect(()=>{if(!loaded)return;const data={tasks,archived,tags,statuses,themeName,pinned,settings};if(saveTimerRef.current)clearTimeout(saveTimerRef.current);if(userId&&cloudImportPending){saveLocalStore(data);return}if(userId&&supabase){saveTimerRef.current=setTimeout(()=>{syncToCloud(data).catch(()=>{})},800);return()=>{if(saveTimerRef.current)clearTimeout(saveTimerRef.current)}}saveStore(data,userId).catch(()=>{})},[tasks,archived,tags,statuses,themeName,pinned,settings,loaded,userId,cloudImportPending]);
 
   // Track latest collapsed state for global shortcut callback
   const collapsedRef=useRef(collapsed);useEffect(()=>{collapsedRef.current=collapsed},[collapsed]);
 
   // Global shortcut: Ctrl+Shift+T works even when window is hidden (Tauri only)
   useEffect(()=>{if(!isTauri)return;let registered=false;const SHORTCUT="CmdOrCtrl+Shift+T";tauriReady.then(async()=>{await registerShortcut(SHORTCUT,async()=>{const appWindow=getCurrentWindow();const visible=await appWindow.isVisible();if(!visible){await appWindow.show();await appWindow.setFocus();return}if(collapsedRef.current)await expandPanel();else await collapsePanel()});registered=true}).catch(()=>{});return()=>{if(registered)tauriReady.then(()=>unregisterShortcut(SHORTCUT)).catch(()=>{})}},[]);
+
+  useEffect(()=>{
+    if(!userId||!supabase)return;
+    const upsertTask=(list,row)=>{const task=mapRowToTask(row);const idx=list.findIndex(item=>item.id===task.id);if(idx===-1)return[...list,task];if(!shouldUseRemoteTask(list[idx],task))return list;const next=[...list];next[idx]={...list[idx],...task};return next};
+    const channel=supabase.channel(`user-${userId}`)
+      .on("postgres_changes",{event:"*",schema:"public",table:"tasks",filter:`user_id=eq.${userId}`},payload=>{
+        const row=payload.eventType==="DELETE"?payload.old:payload.new;
+        if(!row?.id||pendingWriteRef.current.has(`task:${row.id}`))return;
+        if(payload.eventType==="DELETE"){setTasks(prev=>prev.filter(task=>task.id!==row.id));setArchived(prev=>prev.filter(task=>task.id!==row.id));return}
+        if(row.is_archived){setArchived(prev=>upsertTask(prev,row));setTasks(prev=>prev.filter(task=>task.id!==row.id))}
+        else{setTasks(prev=>upsertTask(prev,row));setArchived(prev=>prev.filter(task=>task.id!==row.id))}
+      })
+      .on("postgres_changes",{event:"*",schema:"public",table:"user_settings",filter:`user_id=eq.${userId}`},payload=>{
+        if(payload.eventType==="DELETE"||pendingWriteRef.current.has("settings"))return;
+        const row=payload.new;
+        setTags(row.tags||DEFAULT_TAGS);
+        setStatuses(row.statuses||DEFAULT_STATUSES);
+        setSettings(prev=>({...prev,...DEFAULT_SETTINGS,...(row.settings||{})}));
+        setThemeName(row.theme_name||"Ocean blue");
+      })
+      .subscribe();
+    return()=>{supabase.removeChannel(channel)};
+  },[userId]);
 
   const startMove=(e,toggle)=>{if(e.target.closest("[data-no-drag]"))return;if(!isTauri){if(toggle)toggle();return}e.preventDefault();const sx=e.clientX,sy=e.clientY;let dragging=false;const onMove=ev=>{if(!dragging&&(Math.abs(ev.clientX-sx)>=3||Math.abs(ev.clientY-sy)>=3)){dragging=true;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);getCurrentWindow().startDragging()}};const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);if(!dragging&&toggle)toggle()};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp)};
   const resizeWindow=isTauri?(width,height)=>getCurrentWindow().setSize(new LogicalSize(width,height)):async()=>{};
@@ -493,6 +679,8 @@ export default function TaskTracker(){
   const importData=data=>setImportPending(data);
   const doImportReplace=()=>{const d=importPending;if(!d)return;if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.settings)setSettings({...DEFAULT_SETTINGS,...d.settings});if(d.themeName)setThemeName(d.themeName);setShowSettings(false);setImportPending(null)};
   const doImportMerge=()=>{const d=importPending;if(!d)return;if(d.tasks){const existIds=new Set(tasks.map(t=>t.id));const newTasks=d.tasks.filter(t=>!existIds.has(t.id));setTasks([...tasks,...newTasks.map((t,i)=>({...t,order:tasks.length+i}))])}if(d.archived){const existAIds=new Set(archived.map(a=>a.id));const newArchived=d.archived.filter(a=>!existAIds.has(a.id));setArchived([...archived,...newArchived])}if(d.tags){const existTagNames=new Set(tags.map(t=>t.name));const newTags=d.tags.filter(t=>!existTagNames.has(t.name));setTags([...tags,...newTags])}if(d.statuses){const existStatIds=new Set(statuses.map(s=>s.id));const newStats=d.statuses.filter(s=>!existStatIds.has(s.id));setStatuses([...statuses,...newStats])}setShowSettings(false);setImportPending(null)};
+  const doCloudImportReplace=async()=>{const d=cloudImportPending;if(!d)return;await syncToCloud({tasks:d.tasks||[],archived:d.archived||[],tags:d.tags||DEFAULT_TAGS,statuses:d.statuses||DEFAULT_STATUSES,themeName:d.themeName||"Ocean blue",pinned:d.pinned??pinned,settings:{...DEFAULT_SETTINGS,...(d.settings||{})}});setCloudImportPending(null)};
+  const doCloudImportMerge=async()=>{const d=cloudImportPending;if(!d)return;const mergedTasks=[...tasks];for(const task of d.tasks||[]){if(!mergedTasks.find(existing=>existing.id===task.id))mergedTasks.push({...task,order:mergedTasks.length})}const mergedArchived=[...archived];for(const task of d.archived||[]){if(!mergedArchived.find(existing=>existing.id===task.id))mergedArchived.push(task)}const mergedTags=[...tags];for(const tag of d.tags||[]){if(!mergedTags.find(existing=>existing.name===tag.name))mergedTags.push(tag)}const mergedStatuses=[...statuses];for(const status of d.statuses||[]){if(!mergedStatuses.find(existing=>existing.id===status.id))mergedStatuses.push(status)}await syncToCloud({tasks:mergedTasks,archived:mergedArchived,tags:mergedTags,statuses:mergedStatuses,themeName:d.themeName||themeName,pinned:d.pinned??pinned,settings:{...DEFAULT_SETTINGS,...settings,...(d.settings||{})}});setCloudImportPending(null)};
   const handleSettingsChange=async nextSettings=>{if(nextSettings.autostart!==settings.autostart){try{if(nextSettings.autostart)await autostartEnable();else await autostartDisable()}catch(e){}}setSettings(nextSettings)};
 
   const activeTasks=tasks.filter(t=>t.status==="ip").sort((a,b)=>a.order-b.order);
@@ -556,7 +744,7 @@ export default function TaskTracker(){
         </div>
 
         {/* Settings */}
-        {showSettings&&<div style={{padding:`0 ${mpad+4}px 8px`,flexShrink:0,borderTop:`1px solid ${theme.divider}`,maxHeight:300,overflowY:"auto",WebkitOverflowScrolling:"touch"}}><SettingsPanel theme={theme} themeName={themeName} onThemeChange={setThemeName} statuses={statuses} onStatusesChange={setStatuses} tags={tags} onTagsChange={setTags} settings={settings} onSettingsChange={handleSettingsChange} onExport={exportData} onImport={importData}/></div>}
+        {showSettings&&<div style={{padding:`0 ${mpad+4}px 8px`,flexShrink:0,borderTop:`1px solid ${theme.divider}`,maxHeight:300,overflowY:"auto",WebkitOverflowScrolling:"touch"}}><SettingsPanel theme={theme} themeName={themeName} onThemeChange={setThemeName} statuses={statuses} onStatusesChange={setStatuses} tags={tags} onTagsChange={setTags} settings={settings} onSettingsChange={handleSettingsChange} onExport={exportData} onImport={importData} userEmail={userEmail} localMode={localMode} onSignOut={onSignOut}/></div>}
 
         {/* Bottom */}
         <div style={{padding:`8px ${mpad+4}px ${isMobile?16:12}px`,flexShrink:0,borderTop:`1px solid ${theme.divider}`,background:theme.panelBg,display:"flex",gap:6,alignItems:"center"}}>
@@ -565,6 +753,7 @@ export default function TaskTracker(){
           {!showArchive&&archivable>0&&<button onClick={doArchive} style={{padding:"0 12px",height:isMobile?44:36,borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${theme.newTaskBorder}`,background:theme.btnBg,color:theme.headerText,display:"flex",alignItems:"center",gap:4,fontSize:mfs-2}} onMouseEnter={e=>e.currentTarget.style.borderColor=theme.panelBorder} onMouseLeave={e=>e.currentTarget.style.borderColor=theme.newTaskBorder}>Archive {archivable}</button>}
           {!showArchive&&<button onClick={()=>setAddingTask(!addingTask)} style={{flex:1,height:isMobile?44:36,borderRadius:10,cursor:"pointer",border:`1px ${addingTask?"solid":"dashed"} ${addingTask?theme.panelBorder:theme.newTaskBorder}`,background:addingTask?theme.panelBorder+"15":"none",color:addingTask?theme.panelBorder:theme.headerText,fontSize:mfs-1,display:"flex",alignItems:"center",justifyContent:"center"}} onMouseEnter={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.panelBorder}} onMouseLeave={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.newTaskBorder}}>+ New</button>}
         </div>
+        {cloudImportPending&&<ImportDialog data={cloudImportPending} theme={theme} title="Upload Local Data" description="Cloud storage is empty. Upload your local tasks to Supabase?" replaceLabel="Upload local data" replaceHint="Push your current local tasks and settings to the cloud" mergeLabel="Merge local into cloud" mergeHint="Keep the current state and sync any missing local items" onReplace={doCloudImportReplace} onMerge={doCloudImportMerge} onCancel={()=>setCloudImportPending(null)}/>}
         {importPending&&<ImportDialog data={importPending} theme={theme} onReplace={doImportReplace} onMerge={doImportMerge} onCancel={()=>setImportPending(null)}/>}
       </div>
     );
@@ -640,7 +829,7 @@ export default function TaskTracker(){
         </div>
 
         {/* Settings */}
-        {showSettings&&<div data-no-drag style={{padding:"0 14px 8px",flexShrink:0,borderTop:`1px solid ${theme.divider}`,maxHeight:300,overflowY:"auto"}}><SettingsPanel theme={theme} themeName={themeName} onThemeChange={setThemeName} statuses={statuses} onStatusesChange={setStatuses} tags={tags} onTagsChange={setTags} settings={settings} onSettingsChange={handleSettingsChange} onExport={exportData} onImport={importData}/></div>}
+        {showSettings&&<div data-no-drag style={{padding:"0 14px 8px",flexShrink:0,borderTop:`1px solid ${theme.divider}`,maxHeight:300,overflowY:"auto"}}><SettingsPanel theme={theme} themeName={themeName} onThemeChange={setThemeName} statuses={statuses} onStatusesChange={setStatuses} tags={tags} onTagsChange={setTags} settings={settings} onSettingsChange={handleSettingsChange} onExport={exportData} onImport={importData} userEmail={userEmail} localMode={localMode} onSignOut={onSignOut}/></div>}
 
         {/* Bottom */}
         <div data-no-drag style={{padding:"8px 14px 12px",flexShrink:0,borderTop:`1px solid ${theme.divider}`,background:theme.panelBg,display:"flex",gap:6,alignItems:"stretch"}}>
@@ -649,6 +838,7 @@ export default function TaskTracker(){
           {!showArchive&&archivable>0&&<button onClick={doArchive} style={{padding:"0 10px",borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${theme.newTaskBorder}`,background:theme.btnBg,color:theme.headerText,display:"flex",alignItems:"center",gap:4,fontSize:11}} onMouseEnter={e=>e.currentTarget.style.borderColor=theme.panelBorder} onMouseLeave={e=>e.currentTarget.style.borderColor=theme.newTaskBorder}>Archive {archivable}</button>}
           {!showArchive&&<button onClick={()=>setAddingTask(!addingTask)} style={{flex:1,padding:"0",borderRadius:10,cursor:"pointer",border:`1px ${addingTask?"solid":"dashed"} ${addingTask?theme.panelBorder:theme.newTaskBorder}`,background:addingTask?theme.panelBorder+"15":"none",color:addingTask?theme.panelBorder:theme.headerText,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center"}} onMouseEnter={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.panelBorder}} onMouseLeave={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.newTaskBorder}}>+ New</button>}
         </div>
+        {cloudImportPending&&<ImportDialog data={cloudImportPending} theme={theme} title="Upload Local Data" description="Cloud storage is empty. Upload your local tasks to Supabase?" replaceLabel="Upload local data" replaceHint="Push your current local tasks and settings to the cloud" mergeLabel="Merge local into cloud" mergeHint="Keep the current state and sync any missing local items" onReplace={doCloudImportReplace} onMerge={doCloudImportMerge} onCancel={()=>setCloudImportPending(null)}/>}
         {importPending&&<ImportDialog data={importPending} theme={theme} onReplace={doImportReplace} onMerge={doImportMerge} onCancel={()=>setImportPending(null)}/>}
       </div>
   );
