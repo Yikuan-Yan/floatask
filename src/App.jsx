@@ -170,7 +170,7 @@ function Toggle({value,onChange,theme}){
 
 function SettingsPanel({theme,themeName,onThemeChange,statuses,onStatusesChange,tags,onTagsChange,settings,onSettingsChange,onExport,onImport,theme:th}){
   const fileRef=useRef(null);
-  const handleFile=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{onImport(JSON.parse(ev.target.result))}catch{alert("Invalid file")}};r.readAsText(f)};
+  const handleFile=e=>{const f=e.target.files?.[0];if(!f){alert("No file selected");return}const r=new FileReader();r.onload=ev=>{try{const data=JSON.parse(ev.target.result);onImport(data)}catch(err){alert("Invalid file: "+err.message)}};r.onerror=()=>alert("Failed to read file");r.readAsText(f);e.target.value=""};
   return(
     <div style={{padding:"8px 0"}}>
       {/* Themes */}
@@ -359,13 +359,28 @@ function ContextMenu({x,y,onEdit,onDelete,onDuplicate,onClose,theme}){
 
 /* ═══ Confirm Dialog ═══ */
 
-function ConfirmDialog({message,onConfirm,onCancel,theme}){
+function ConfirmDialog({message,onConfirm,onCancel,theme,confirmLabel="Delete",confirmDanger=true}){
   return(<div style={{position:"fixed",inset:0,zIndex:10002,background:"rgba(0,0,0,0.25)",display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onCancel}>
     <div onClick={e=>e.stopPropagation()} style={{background:theme.cardBg,border:`1px solid ${theme.inputBorder}`,borderRadius:12,padding:"20px 24px",minWidth:220,maxWidth:300,boxShadow:"0 8px 32px rgba(0,0,0,0.18)"}}>
       <p style={{fontSize:13,color:theme.textPrimary,margin:"0 0 16px",lineHeight:1.5}}>{message}</p>
       <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
         <button onClick={onCancel} style={{fontSize:12,padding:"6px 16px",borderRadius:6,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.btnText}}>Cancel</button>
-        <button onClick={onConfirm} style={{fontSize:12,padding:"6px 16px",borderRadius:6,cursor:"pointer",background:theme.btnDangerBg,border:`1px solid ${theme.btnDangerText}30`,color:theme.btnDangerText,fontWeight:500}}>Delete</button>
+        <button onClick={onConfirm} style={{fontSize:12,padding:"6px 16px",borderRadius:6,cursor:"pointer",background:confirmDanger?theme.btnDangerBg:theme.btnPrimaryBg,border:confirmDanger?`1px solid ${theme.btnDangerText}30`:"none",color:confirmDanger?theme.btnDangerText:theme.btnPrimaryText,fontWeight:500}}>{confirmLabel}</button>
+      </div>
+    </div>
+  </div>);
+}
+
+function ImportDialog({data,onReplace,onMerge,onCancel,theme}){
+  const tc=data.tasks?data.tasks.length:0;const ac=data.archived?data.archived.length:0;
+  return(<div style={{position:"fixed",inset:0,zIndex:10002,background:"rgba(0,0,0,0.25)",display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onCancel}>
+    <div onClick={e=>e.stopPropagation()} style={{background:theme.cardBg,border:`1px solid ${theme.inputBorder}`,borderRadius:12,padding:"20px 24px",minWidth:260,maxWidth:340,boxShadow:"0 8px 32px rgba(0,0,0,0.18)"}}>
+      <p style={{fontSize:14,fontWeight:600,color:theme.textPrimary,margin:"0 0 8px"}}>Import Data</p>
+      <p style={{fontSize:12,color:theme.textSecondary,margin:"0 0 16px",lineHeight:1.5}}>Found {tc} tasks{ac>0?` and ${ac} archived`:""}{data.themeName?`, theme: ${data.themeName}`:""}</p>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        <button onClick={onReplace} style={{fontSize:12,padding:"10px 16px",borderRadius:8,cursor:"pointer",background:theme.btnPrimaryBg,border:"none",color:theme.btnPrimaryText,fontWeight:500,textAlign:"left"}}>Replace all data<br/><span style={{fontSize:11,opacity:0.8,fontWeight:400}}>Clear current data and import</span></button>
+        <button onClick={onMerge} style={{fontSize:12,padding:"10px 16px",borderRadius:8,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.textPrimary,fontWeight:500,textAlign:"left"}}>Merge<br/><span style={{fontSize:11,opacity:0.6,fontWeight:400}}>Add imported tasks to existing data</span></button>
+        <button onClick={onCancel} style={{fontSize:12,padding:"8px 16px",borderRadius:8,cursor:"pointer",background:"transparent",border:"none",color:theme.textSecondary,textAlign:"center"}}>Cancel</button>
       </div>
     </div>
   </div>);
@@ -417,7 +432,7 @@ export default function TaskTracker(){
   const[tasks,setTasks]=useState(INITIAL_TASKS);const[archived,setArchived]=useState([]);const[tags,setTags]=useState(DEFAULT_TAGS);const[statuses,setStatuses]=useState(DEFAULT_STATUSES);
   const[collapsed,setCollapsed]=useState(true);const[loaded,setLoaded]=useState(false);const[showSettings,setShowSettings]=useState(false);const[showArchive,setShowArchive]=useState(false);
   const[filterTag,setFilterTag]=useState(null);const[themeName,setThemeName]=useState("Ocean blue");const[pinned,setPinned]=useState(false);const[minimized,setMinimized]=useState(false);
-  const[showOverflow,setShowOverflow]=useState(false);const[showSearch,setShowSearch]=useState(false);const[settings,setSettings]=useState(DEFAULT_SETTINGS);const[addingTask,setAddingTask]=useState(false);
+  const[showOverflow,setShowOverflow]=useState(false);const[showSearch,setShowSearch]=useState(false);const[settings,setSettings]=useState(DEFAULT_SETTINGS);const[addingTask,setAddingTask]=useState(false);const[importPending,setImportPending]=useState(null);
   const panelRef=useRef(null);const preExpandPos=useRef(null);const collapsedSizeRef=useRef({...COLLAPSED_WINDOW});const expandedSizeRef=useRef({...EXPANDED_WINDOW});const preOverflowH=useRef(null);const theme=THEMES[themeName]||THEMES["Ocean blue"];
   const[winWidth,setWinWidth]=useState(window.innerWidth||COLLAPSED_WINDOW.w);
 
@@ -466,7 +481,9 @@ export default function TaskTracker(){
 
   // Export / Import
   const exportData=()=>{const data={tasks,archived,tags,statuses,settings,themeName,version:VER};const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`task-tracker-${today()}.json`;a.click();URL.revokeObjectURL(url)};
-  const importData=data=>{if(data.tasks)setTasks(data.tasks);if(data.archived)setArchived(data.archived);if(data.tags)setTags(data.tags);if(data.statuses)setStatuses(data.statuses);if(data.settings)setSettings({...DEFAULT_SETTINGS,...data.settings});if(data.themeName)setThemeName(data.themeName)};
+  const importData=data=>setImportPending(data);
+  const doImportReplace=()=>{const d=importPending;if(!d)return;if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.settings)setSettings({...DEFAULT_SETTINGS,...d.settings});if(d.themeName)setThemeName(d.themeName);setShowSettings(false);setImportPending(null)};
+  const doImportMerge=()=>{const d=importPending;if(!d)return;if(d.tasks){const existIds=new Set(tasks.map(t=>t.id));const newTasks=d.tasks.filter(t=>!existIds.has(t.id));setTasks([...tasks,...newTasks.map((t,i)=>({...t,order:tasks.length+i}))])}if(d.archived){const existAIds=new Set(archived.map(a=>a.id));const newArchived=d.archived.filter(a=>!existAIds.has(a.id));setArchived([...archived,...newArchived])}if(d.tags){const existTagNames=new Set(tags.map(t=>t.name));const newTags=d.tags.filter(t=>!existTagNames.has(t.name));setTags([...tags,...newTags])}if(d.statuses){const existStatIds=new Set(statuses.map(s=>s.id));const newStats=d.statuses.filter(s=>!existStatIds.has(s.id));setStatuses([...statuses,...newStats])}setShowSettings(false);setImportPending(null)};
   const handleSettingsChange=async nextSettings=>{if(nextSettings.autostart!==settings.autostart){try{if(nextSettings.autostart)await autostartEnable();else await autostartDisable()}catch(e){}}setSettings(nextSettings)};
 
   const activeTasks=tasks.filter(t=>t.status==="ip").sort((a,b)=>a.order-b.order);
@@ -539,6 +556,7 @@ export default function TaskTracker(){
           {!showArchive&&archivable>0&&<button onClick={doArchive} style={{padding:"0 12px",height:isMobile?44:36,borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${theme.newTaskBorder}`,background:theme.btnBg,color:theme.headerText,display:"flex",alignItems:"center",gap:4,fontSize:mfs-2}} onMouseEnter={e=>e.currentTarget.style.borderColor=theme.panelBorder} onMouseLeave={e=>e.currentTarget.style.borderColor=theme.newTaskBorder}>Archive {archivable}</button>}
           {!showArchive&&<button onClick={()=>setAddingTask(!addingTask)} style={{flex:1,height:isMobile?44:36,borderRadius:10,cursor:"pointer",border:`1px ${addingTask?"solid":"dashed"} ${addingTask?theme.panelBorder:theme.newTaskBorder}`,background:addingTask?theme.panelBorder+"15":"none",color:addingTask?theme.panelBorder:theme.headerText,fontSize:mfs-1,display:"flex",alignItems:"center",justifyContent:"center"}} onMouseEnter={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.panelBorder}} onMouseLeave={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.newTaskBorder}}>+ New</button>}
         </div>
+        {importPending&&<ImportDialog data={importPending} theme={theme} onReplace={doImportReplace} onMerge={doImportMerge} onCancel={()=>setImportPending(null)}/>}
       </div>
     );
   }
@@ -622,6 +640,7 @@ export default function TaskTracker(){
           {!showArchive&&archivable>0&&<button onClick={doArchive} style={{padding:"0 10px",borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${theme.newTaskBorder}`,background:theme.btnBg,color:theme.headerText,display:"flex",alignItems:"center",gap:4,fontSize:11}} onMouseEnter={e=>e.currentTarget.style.borderColor=theme.panelBorder} onMouseLeave={e=>e.currentTarget.style.borderColor=theme.newTaskBorder}>Archive {archivable}</button>}
           {!showArchive&&<button onClick={()=>setAddingTask(!addingTask)} style={{flex:1,padding:"0",borderRadius:10,cursor:"pointer",border:`1px ${addingTask?"solid":"dashed"} ${addingTask?theme.panelBorder:theme.newTaskBorder}`,background:addingTask?theme.panelBorder+"15":"none",color:addingTask?theme.panelBorder:theme.headerText,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center"}} onMouseEnter={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.panelBorder}} onMouseLeave={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.newTaskBorder}}>+ New</button>}
         </div>
+        {importPending&&<ImportDialog data={importPending} theme={theme} onReplace={doImportReplace} onMerge={doImportMerge} onCancel={()=>setImportPending(null)}/>}
       </div>
   );
 }
