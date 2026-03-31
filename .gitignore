@@ -13,6 +13,9 @@ src-tauri/target/
 .vscode/
 .idea/
 
+# Agent workspace
+.agent/
+
 # OS
 Thumbs.db
 .DS_Store

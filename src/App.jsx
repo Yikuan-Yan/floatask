@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 /* ═══ Storage Abstraction ═══ */
 
@@ -50,6 +53,8 @@ const COLORS = ["#7F77DD","#1D9E75","#378ADD","#D85A30","#D4537E","#BA7517","#63
 const getS = (ss,id) => ss.find(s=>s.id===id)||ss[0];
 const REPO_URL = "https://github.com/Yikuan-Yan/floatask";
 const VER = "1.0.0";
+const EXPANDED_WINDOW = { w:400, h:580 };
+const COLLAPSED_WINDOW = { w:260, h:160 };
 
 function mainDate(t){ if(t.status==="ip")return t.startedAt||t.createdAt; if(t.status==="dn"||t.status==="na")return t.completedAt||t.createdAt; return t.createdAt; }
 function applyStatusDates(t,ns){ const r={...t,status:ns}; if(ns==="ip"&&!r.startedAt)r.startedAt=today(); if((ns==="dn"||ns==="na")&&!r.completedAt)r.completedAt=today(); return r; }
@@ -96,7 +101,7 @@ function renderInline(text, color) {
     if (match.index > i) parts.push(<span key={key++}>{text.slice(i, match.index)}</span>);
     if (match[1]) parts.push(<strong key={key++} style={{ fontWeight: 600 }}>{match[2]}</strong>);
     else if (match[3]) parts.push(<code key={key++} style={{ fontSize: "0.9em", padding: "1px 4px", borderRadius: 3, background: color ? color + "10" : "rgba(0,0,0,0.06)" }}>{match[4]}</code>);
-    else if (match[5]) parts.push(<a key={key++} href={match[7]} target="_blank" rel="noopener noreferrer" style={{ color: "#378ADD", textDecoration: "underline", cursor: "pointer" }} onClick={e => e.stopPropagation()}>{match[6]}</a>);
+    else if (match[5]) {const url=match[7];parts.push(<a key={key++} href={url} target="_blank" rel="noopener noreferrer" style={{ color: "#378ADD", textDecoration: "underline", cursor: "pointer" }} onClick={e => {e.stopPropagation();e.preventDefault();import("@tauri-apps/plugin-opener").then(m=>m.openUrl(url)).catch(()=>window.open(url,"_blank"))}}>{match[6]}</a>);}
     i = match.index + match[0].length;
   }
   if (i < text.length) parts.push(<span key={key++}>{text.slice(i)}</span>);
@@ -202,7 +207,7 @@ function SettingsPanel({theme,themeName,onThemeChange,statuses,onStatusesChange,
           <button onClick={()=>fileRef.current?.click()} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.btnText}}>Import JSON</button>
           <input ref={fileRef} type="file" accept=".json" onChange={handleFile} style={{display:"none"}}/>
         </div>
-        <a href={`${REPO_URL}/releases`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{fontSize:10,color:theme.textSecondary,opacity:0.5,margin:"8px 0 0",display:"block",textDecoration:"none",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.opacity="0.8"} onMouseLeave={e=>e.currentTarget.style.opacity="0.5"}>Floatask v{VER}</a>
+        <a href={`${REPO_URL}/releases`} target="_blank" rel="noopener noreferrer" onClick={e=>{e.stopPropagation();e.preventDefault();import("@tauri-apps/plugin-opener").then(m=>m.openUrl(`${REPO_URL}/releases`)).catch(()=>window.open(`${REPO_URL}/releases`,"_blank"))}} style={{fontSize:10,color:theme.textSecondary,opacity:0.5,margin:"8px 0 0",display:"block",textDecoration:"none",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.opacity="0.8"} onMouseLeave={e=>e.currentTarget.style.opacity="0.5"}>Floatask v{VER}</a>
       </div>
     </div>
   );
@@ -210,12 +215,14 @@ function SettingsPanel({theme,themeName,onThemeChange,statuses,onStatusesChange,
 
 /* ═══ Task Card ═══ */
 
-function TaskCard({task,allTags,statuses,onUpdate,onDelete,theme,isDragOver,onDragStart,onDragEnter,onDragEnd}){
+function TaskCard({task,allTags,statuses,onUpdate,onDelete,onDuplicate,theme,isDragOver,onDragStart,onDragEnter,onDragEnd}){
   const[expanded,setExpanded]=useState(false);const[editing,setEditing]=useState(false);const[ed,setEd]=useState({...task});const[hover,setHover]=useState(false);
+  const[confirmDel,setConfirmDel]=useState(false);const[ctxMenu,setCtxMenu]=useState(null);
   useEffect(()=>{setEd({...task})},[task]);
-  const save=()=>{onUpdate({...ed});setEditing(false)};const cancel=()=>{setEd({...task});setEditing(false)};const startEdit=e=>{e.stopPropagation();setEditing(true);setExpanded(true)};
+  const save=()=>{onUpdate({...ed});setEditing(false)};const cancel=()=>{setEd({...task});setEditing(false)};const startEdit=()=>{setEditing(true);setExpanded(true)};
   const sc=getS(statuses,task.status);const isActive=task.status==="ip";const hasNotes=task.fullNote||task.shortNote;const md=fmtDate(mainDate(task));
   const handleStatusChange=v=>setEd(applyStatusDates({...ed},v));
+  const handleContext=e=>{e.preventDefault();e.stopPropagation();setCtxMenu({x:e.clientX,y:e.clientY})};
 
   if(editing){return(
     <div style={{background:theme.cardBg,border:`1.5px solid ${theme.panelBorder}`,borderRadius:10,padding:"12px 14px",marginBottom:5}}>
@@ -228,18 +235,19 @@ function TaskCard({task,allTags,statuses,onUpdate,onDelete,theme,isDragOver,onDr
       <textarea value={ed.fullNote} onChange={e=>setEd({...ed,fullNote:e.target.value})} placeholder="Full notes (supports **bold**, `code`, [links](url))" rows={4}
         style={{width:"100%",boxSizing:"border-box",fontSize:12,fontFamily:"inherit",border:`1px solid ${theme.inputBorder}`,borderRadius:6,padding:"5px 8px",marginBottom:8,resize:"vertical",background:theme.inputBg,color:theme.textPrimary}}/>
       <div style={{display:"flex",gap:6,justifyContent:"space-between"}}>
-        <button onClick={()=>{if(confirm("Delete?"))onDelete(task.id)}} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnDangerBg,border:`1px solid ${theme.btnDangerText}30`,color:theme.btnDangerText,fontWeight:500}}>Delete</button>
+        <button onClick={()=>setConfirmDel(true)} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnDangerBg,border:`1px solid ${theme.btnDangerText}30`,color:theme.btnDangerText,fontWeight:500}}>Delete</button>
         <div style={{display:"flex",gap:6}}>
           <button onClick={cancel} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.btnText}}>Cancel</button>
           <button onClick={save} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnPrimaryBg,border:"none",color:theme.btnPrimaryText,fontWeight:500}}>Save</button>
         </div>
       </div>
+      {confirmDel&&<ConfirmDialog message={`Delete "${task.name}"?`} onConfirm={()=>onDelete(task.id)} onCancel={()=>setConfirmDel(false)} theme={theme}/>}
     </div>
   )}
 
   return(
-    <div draggable onDragStart={e=>{e.dataTransfer.effectAllowed="move";onDragStart(task.id)}} onDragEnter={e=>{e.preventDefault();onDragEnter(task.id)}} onDragOver={e=>e.preventDefault()} onDragEnd={onDragEnd}
-      onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}
+    <div draggable onDragStart={e=>{e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",task.id);onDragStart(task.id)}} onDragEnter={e=>{e.preventDefault();onDragEnter(task.id)}} onDragOver={e=>e.preventDefault()} onDragEnd={onDragEnd}
+      onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)} onContextMenu={handleContext}
       style={{background:theme.cardBg,border:`1px solid ${isDragOver?theme.panelBorder:hover?theme.inputBorder:theme.divider+"60"}`,borderLeft:isActive?`3px solid ${sc.color}`:undefined,borderRadius:10,marginBottom:5,opacity:1,transition:"border-color 0.15s ease",overflow:"hidden",borderTopWidth:isDragOver?2:1,borderTopColor:isDragOver?theme.accentLeft:undefined}}>
       <div onClick={()=>setExpanded(!expanded)} style={{display:"flex",alignItems:"center",gap:7,padding:"8px 10px",cursor:"pointer"}}>
         <ChevronIcon open={expanded}/>
@@ -262,12 +270,14 @@ function TaskCard({task,allTags,statuses,onUpdate,onDelete,theme,isDragOver,onDr
             {task.completedAt&&<span style={{fontSize:10,color:theme.textSecondary,opacity:0.5}}>done {fmtDate(task.completedAt)}</span>}
             {task.tags.map(t=>{const tag=allTags.find(at=>at.name===t);return tag?<TagPill key={t} name={t} color={tag.color} small/>:null})}
             <span style={{flex:1}}/>
-            <span onClick={startEdit} style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:11,color:theme.btnText,cursor:"pointer",padding:"2px 8px",borderRadius:6,background:theme.btnBg,border:`0.5px solid ${theme.inputBorder}`}}>
+            <span onClick={e=>{e.stopPropagation();startEdit()}} style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:11,color:theme.btnText,cursor:"pointer",padding:"2px 8px",borderRadius:6,background:theme.btnBg,border:`0.5px solid ${theme.inputBorder}`}}>
               <svg width="10" height="10" viewBox="0 0 12 12"><path d="M8.5 1.5L10.5 3.5L4 10H2V8L8.5 1.5Z" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/></svg>edit
             </span>
           </div>
         </div>
       )}
+      {ctxMenu&&<ContextMenu x={ctxMenu.x} y={ctxMenu.y} theme={theme} onClose={()=>setCtxMenu(null)} onEdit={()=>startEdit()} onDelete={()=>setConfirmDel(true)} onDuplicate={()=>onDuplicate(task)}/>}
+      {confirmDel&&<ConfirmDialog message={`Delete "${task.name}"?`} onConfirm={()=>onDelete(task.id)} onCancel={()=>setConfirmDel(false)} theme={theme}/>}
     </div>
   );
 }
@@ -299,28 +309,59 @@ function ArchiveCard({task,allTags,statuses,onRestore,theme}){
 
 /* ═══ Add Task ═══ */
 
-function AddTaskInline({allTags,statuses,onAdd,theme,defaultStatus}){
-  const[open,setOpen]=useState(false);const[name,setName]=useState("");const[status,setStatus]=useState(defaultStatus);const[tags,setTags]=useState([]);
-  const inputRef=useRef(null);useEffect(()=>{if(open&&inputRef.current)inputRef.current.focus()},[open]);
-  useEffect(()=>{if(!open)setStatus(defaultStatus)},[defaultStatus,open]);
-  const submit=()=>{if(!name.trim())return;onAdd(applyStatusDates({id:genId(),name:name.trim(),status,tags,shortNote:"",fullNote:"",order:Date.now(),createdAt:today(),startedAt:"",completedAt:""},status));setName("");setStatus(defaultStatus);setTags([]);setOpen(false)};
-  if(!open)return <button onClick={()=>setOpen(true)} style={{width:"100%",padding:"9px 0",border:`1px dashed ${theme.newTaskBorder}`,borderRadius:10,background:"none",cursor:"pointer",fontSize:12,color:theme.headerText}} onMouseEnter={e=>e.currentTarget.style.borderColor=theme.panelBorder} onMouseLeave={e=>e.currentTarget.style.borderColor=theme.newTaskBorder}>+ New task</button>;
-  return(<div style={{border:`1.5px solid ${theme.panelBorder}`,borderRadius:10,padding:"10px 12px",background:theme.cardBg}}>
-    <input ref={inputRef} value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")submit();if(e.key==="Escape")setOpen(false)}} placeholder="Task name" style={{width:"100%",boxSizing:"border-box",fontSize:13,fontWeight:500,border:`1px solid ${theme.inputBorder}`,borderRadius:6,padding:"6px 8px",marginBottom:8,background:theme.inputBg,color:theme.textPrimary}}/>
+function AddTaskForm({allTags,statuses,onAdd,onCancel,theme,defaultStatus}){
+  const[name,setName]=useState("");const[status,setStatus]=useState(defaultStatus);const[tags,setTags]=useState([]);
+  const[shortNote,setShortNote]=useState("");const[fullNote,setFullNote]=useState("");
+  const inputRef=useRef(null);useEffect(()=>{inputRef.current?.focus()},[]);
+  const submit=()=>{if(!name.trim())return;onAdd(applyStatusDates({id:genId(),name:name.trim(),status,tags,shortNote:shortNote.trim(),fullNote:fullNote.trim(),order:Date.now(),createdAt:today(),startedAt:"",completedAt:""},status));onCancel()};
+  return(<div style={{border:`1.5px solid ${theme.panelBorder}`,borderRadius:10,padding:"10px 12px",marginBottom:8,background:theme.cardBg}}>
+    <input ref={inputRef} value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==="Escape")onCancel()}} placeholder="Task name" style={{width:"100%",boxSizing:"border-box",fontSize:13,fontWeight:500,border:`1px solid ${theme.inputBorder}`,borderRadius:6,padding:"6px 8px",marginBottom:8,background:theme.inputBg,color:theme.textPrimary}}/>
     <div style={{display:"flex",gap:8,marginBottom:8}}>
       <DropSelect value={status} options={statuses} onChange={setStatus} placeholder="Status" valueKey="id" labelKey="name" colorKey="color" theme={theme}/>
       <DropSelect value={tags} options={allTags.map(t=>({...t,id:t.name}))} onChange={setTags} multi placeholder="Tags" valueKey="id" labelKey="name" colorKey="color" theme={theme}/>
     </div>
+    <input value={shortNote} onChange={e=>setShortNote(e.target.value)} placeholder="Short reminder" style={{width:"100%",boxSizing:"border-box",fontSize:12,border:`1px solid ${theme.inputBorder}`,borderRadius:6,padding:"5px 8px",marginBottom:6,background:theme.inputBg,color:theme.textPrimary}}/>
+    <textarea value={fullNote} onChange={e=>setFullNote(e.target.value)} placeholder="Full notes (supports **bold**, `code`, [links](url))" rows={2}
+      style={{width:"100%",boxSizing:"border-box",fontSize:12,fontFamily:"inherit",border:`1px solid ${theme.inputBorder}`,borderRadius:6,padding:"5px 8px",marginBottom:8,resize:"vertical",background:theme.inputBg,color:theme.textPrimary}}/>
     <div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
-      <button onClick={()=>setOpen(false)} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.btnText}}>Cancel</button>
+      <button onClick={onCancel} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.btnText}}>Cancel</button>
       <button onClick={submit} style={{fontSize:11,padding:"5px 12px",borderRadius:6,cursor:"pointer",background:theme.btnPrimaryBg,border:"none",color:theme.btnPrimaryText,fontWeight:500}}>Add</button>
+    </div>
+  </div>);
+}
+
+/* ═══ Context Menu ═══ */
+
+function ContextMenu({x,y,onEdit,onDelete,onDuplicate,onClose,theme}){
+  const ref=useRef(null);
+  useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))onClose()};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h)},[onClose]);
+  const items=[{label:"Edit",action:onEdit},{label:"Duplicate",action:onDuplicate},{label:"Delete",action:onDelete,danger:true}];
+  return(<div ref={ref} style={{position:"fixed",left:x,top:y,zIndex:10001,background:theme.cardBg,border:`1px solid ${theme.inputBorder}`,borderRadius:8,padding:4,minWidth:120,boxShadow:"0 4px 16px rgba(0,0,0,0.15)"}}>
+    {items.map(it=><div key={it.label} onClick={()=>{it.action();onClose()}}
+      style={{fontSize:12,padding:"6px 12px",borderRadius:5,cursor:"pointer",color:it.danger?theme.btnDangerText:theme.textPrimary}}
+      onMouseEnter={e=>e.currentTarget.style.background=it.danger?theme.btnDangerBg:theme.inputBg}
+      onMouseLeave={e=>e.currentTarget.style.background="transparent"}>{it.label}</div>)}
+  </div>);
+}
+
+/* ═══ Confirm Dialog ═══ */
+
+function ConfirmDialog({message,onConfirm,onCancel,theme}){
+  return(<div style={{position:"fixed",inset:0,zIndex:10002,background:"rgba(0,0,0,0.25)",display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onCancel}>
+    <div onClick={e=>e.stopPropagation()} style={{background:theme.cardBg,border:`1px solid ${theme.inputBorder}`,borderRadius:12,padding:"20px 24px",minWidth:220,maxWidth:300,boxShadow:"0 8px 32px rgba(0,0,0,0.18)"}}>
+      <p style={{fontSize:13,color:theme.textPrimary,margin:"0 0 16px",lineHeight:1.5}}>{message}</p>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+        <button onClick={onCancel} style={{fontSize:12,padding:"6px 16px",borderRadius:6,cursor:"pointer",background:theme.btnBg,border:`1px solid ${theme.inputBorder}`,color:theme.btnText}}>Cancel</button>
+        <button onClick={onConfirm} style={{fontSize:12,padding:"6px 16px",borderRadius:6,cursor:"pointer",background:theme.btnDangerBg,border:`1px solid ${theme.btnDangerText}30`,color:theme.btnDangerText,fontWeight:500}}>Delete</button>
+      </div>
     </div>
   </div>);
 }
 
 /* ═══ Resize Handles ═══ */
 
-function ResizeHandles({onResize}){const H=6;return <>{["n","s","e","w","nw","ne","sw","se"].map(d=>{const cm={n:"ns-resize",s:"ns-resize",e:"ew-resize",w:"ew-resize",ne:"nesw-resize",nw:"nwse-resize",se:"nwse-resize",sw:"nesw-resize"};const pm={n:{top:-H/2,left:H,right:H,height:H},s:{bottom:-H/2,left:H,right:H,height:H},w:{top:H,bottom:H,left:-H/2,width:H},e:{top:H,bottom:H,right:-H/2,width:H},nw:{top:-H/2,left:-H/2,width:H*2,height:H*2},ne:{top:-H/2,right:-H/2,width:H*2,height:H*2},sw:{bottom:-H/2,left:-H/2,width:H*2,height:H*2},se:{bottom:-H/2,right:-H/2,width:H*2,height:H*2}};return <div key={d} onMouseDown={e=>onResize(e,d)} style={{position:"absolute",cursor:cm[d],zIndex:d.length>1?11:10,...pm[d]}}/>})}</>}
+const RESIZE_DIR_MAP={n:"North",s:"South",e:"East",w:"West",nw:"NorthWest",ne:"NorthEast",sw:"SouthWest",se:"SouthEast"};
+function ResizeHandles(){const H=6;return <>{["n","s","e","w","nw","ne","sw","se"].map(d=>{const cm={n:"ns-resize",s:"ns-resize",e:"ew-resize",w:"ew-resize",ne:"nesw-resize",nw:"nwse-resize",se:"nwse-resize",sw:"nesw-resize"};const pm={n:{top:0,left:H,right:H,height:H},s:{bottom:0,left:H,right:H,height:H},w:{top:H,bottom:H,left:0,width:H},e:{top:H,bottom:H,right:0,width:H},nw:{top:0,left:0,width:H*2,height:H*2},ne:{top:0,right:0,width:H*2,height:H*2},sw:{bottom:0,left:0,width:H*2,height:H*2},se:{bottom:0,right:0,width:H*2,height:H*2}};return <div key={d} onMouseDown={e=>{e.preventDefault();getCurrentWindow().startResizeDragging(RESIZE_DIR_MAP[d])}} style={{position:"absolute",cursor:cm[d],zIndex:d.length>1?11:10,...pm[d]}}/>})}</>}
 
 /* ═══ Search Overlay ═══ */
 
@@ -363,39 +404,45 @@ export default function TaskTracker(){
   const[tasks,setTasks]=useState(INITIAL_TASKS);const[archived,setArchived]=useState([]);const[tags,setTags]=useState(DEFAULT_TAGS);const[statuses,setStatuses]=useState(DEFAULT_STATUSES);
   const[collapsed,setCollapsed]=useState(true);const[loaded,setLoaded]=useState(false);const[showSettings,setShowSettings]=useState(false);const[showArchive,setShowArchive]=useState(false);
   const[filterTag,setFilterTag]=useState(null);const[themeName,setThemeName]=useState("Ocean blue");const[pinned,setPinned]=useState(false);const[minimized,setMinimized]=useState(false);
-  const[showOverflow,setShowOverflow]=useState(false);const[showSearch,setShowSearch]=useState(false);const[settings,setSettings]=useState(DEFAULT_SETTINGS);
-  const[pos,setPos]=useState({x:20,y:20});const[preExpandPos,setPreExpandPos]=useState(null);const[size,setSize]=useState({w:400,h:580});const[cSize,setCSize]=useState({w:260,h:0});
-  const panelRef=useRef(null);const theme=THEMES[themeName]||THEMES["Ocean blue"];
+  const[showOverflow,setShowOverflow]=useState(false);const[showSearch,setShowSearch]=useState(false);const[settings,setSettings]=useState(DEFAULT_SETTINGS);const[addingTask,setAddingTask]=useState(false);
+  const panelRef=useRef(null);const preExpandPos=useRef(null);const collapsedSizeRef=useRef({...COLLAPSED_WINDOW});const expandedSizeRef=useRef({...EXPANDED_WINDOW});const preOverflowH=useRef(null);const theme=THEMES[themeName]||THEMES["Ocean blue"];
+  const[winWidth,setWinWidth]=useState(window.innerWidth||COLLAPSED_WINDOW.w);
 
   // Drag reorder state
   const[dragFromId,setDragFromId]=useState(null);const[dragOverId,setDragOverId]=useState(null);
 
-  useEffect(()=>{(async()=>{try{const d=await loadStore();if(d){if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.pos)setPos(d.pos);if(d.size)setSize(d.size);if(d.cSize)setCSize(d.cSize);if(d.themeName)setThemeName(d.themeName);if(d.pinned!==undefined)setPinned(d.pinned);if(d.settings)setSettings({...DEFAULT_SETTINGS,...d.settings})}}catch(e){}setLoaded(true)})()},[]);
+  useEffect(()=>{const h=()=>setWinWidth(window.innerWidth);window.addEventListener("resize",h);return()=>window.removeEventListener("resize",h)},[]);
 
-  useEffect(()=>{if(!loaded)return;saveStore({tasks,archived,tags,statuses,pos,size,cSize,themeName,pinned,settings})},[tasks,archived,tags,statuses,pos,size,cSize,themeName,pinned,settings,loaded]);
+  useEffect(()=>{(async()=>{try{const d=await loadStore();let nextSettings=DEFAULT_SETTINGS;if(d){if(d.tasks)setTasks(d.tasks);if(d.archived)setArchived(d.archived);if(d.tags)setTags(d.tags);if(d.statuses)setStatuses(d.statuses);if(d.themeName)setThemeName(d.themeName);if(d.pinned!==undefined)setPinned(d.pinned);if(d.settings)nextSettings={...DEFAULT_SETTINGS,...d.settings}}try{nextSettings={...nextSettings,autostart:await isEnabled()}}catch(e){}setSettings(nextSettings)}catch(e){}setLoaded(true)})()},[]);
 
-  // Keyboard shortcut: Ctrl+Shift+T toggles collapsed
-  useEffect(()=>{const h=e=>{if(e.ctrlKey&&e.shiftKey&&e.key==="T"){e.preventDefault();if(minimized)setMinimized(false);else if(collapsed)expandPanel();else collapsePanel()}};document.addEventListener("keydown",h);return()=>document.removeEventListener("keydown",h)},[collapsed,minimized]);
+  // Sync pinned state to Tauri window — runs on load and on every toggle
+  useEffect(()=>{if(!loaded)return;getCurrentWindow().setAlwaysOnTop(pinned).catch(()=>{})},[pinned,loaded]);
 
-  const startMove=(e,toggle)=>{if(e.target.closest("[data-no-drag]"))return;e.preventDefault();const sx=e.clientX,sy=e.clientY,sp={...pos};let moved=false;const onMove=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy;if(Math.abs(dx)>3||Math.abs(dy)>3)moved=true;if(moved)setPos({x:Math.max(0,sp.x+dx),y:Math.max(0,sp.y+dy)})};const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);if(!moved&&toggle)toggle()};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp)};
-  const doResize=(e,dir,minW,maxW,minH,maxH,sz,setSz)=>{e.preventDefault();e.stopPropagation();const sx=e.clientX,sy=e.clientY,ss={...sz},sp={...pos};const onMove=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy;let nw=ss.w,nh=ss.h,nx=sp.x,ny=sp.y;if(dir.includes("e"))nw=Math.min(maxW,Math.max(minW,ss.w+dx));if(dir.includes("w")){nw=Math.min(maxW,Math.max(minW,ss.w-dx));nx=sp.x+(ss.w-nw)}if(dir.includes("s"))nh=Math.min(maxH,Math.max(minH,ss.h+dy));if(dir.includes("n")){nh=Math.min(maxH,Math.max(minH,ss.h-dy));ny=sp.y+(ss.h-nh)}setSz({w:nw,h:nh});setPos({x:Math.max(0,nx),y:Math.max(0,ny)})};const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp)};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp)};
+  useEffect(()=>{if(!loaded)return;saveStore({tasks,archived,tags,statuses,themeName,pinned,settings})},[tasks,archived,tags,statuses,themeName,pinned,settings,loaded]);
 
-  const expandPanel=()=>{setPreExpandPos({...pos});const vw=window.innerWidth||800,vh=window.innerHeight||600;let nx=pos.x,ny=pos.y;if(nx+size.w>vw-10)nx=Math.max(0,vw-size.w-10);if(ny+size.h>vh-10)ny=Math.max(0,vh-size.h-10);setPos({x:nx,y:ny});setCollapsed(false);setShowOverflow(false)};
-  const collapsePanel=()=>{if(preExpandPos){setPos(preExpandPos);setPreExpandPos(null)}setCollapsed(true)};
+  // Keyboard shortcut: Ctrl+Shift+T toggles collapsed or restores the hidden window
+  useEffect(()=>{const h=e=>{if(e.ctrlKey&&e.shiftKey&&e.key==="T"){e.preventDefault();(async()=>{const appWindow=getCurrentWindow();if(!(await appWindow.isVisible())){await appWindow.show();await resizeWindow(collapsed?COLLAPSED_WINDOW.w:EXPANDED_WINDOW.w,collapsed?COLLAPSED_WINDOW.h:EXPANDED_WINDOW.h);return}if(collapsed)await expandPanel();else await collapsePanel()})()}};document.addEventListener("keydown",h);return()=>document.removeEventListener("keydown",h)},[collapsed]);
+
+  const startMove=(e,toggle)=>{if(e.target.closest("[data-no-drag]"))return;e.preventDefault();const sx=e.clientX,sy=e.clientY;let dragging=false;const onMove=ev=>{if(!dragging&&(Math.abs(ev.clientX-sx)>=3||Math.abs(ev.clientY-sy)>=3)){dragging=true;document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);getCurrentWindow().startDragging()}};const onUp=()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);if(!dragging&&toggle)toggle()};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp)};
+  const resizeWindow=(width,height)=>getCurrentWindow().setSize(new LogicalSize(width,height));
+  const expandPanel=async()=>{const appWindow=getCurrentWindow();collapsedSizeRef.current={w:window.innerWidth,h:window.innerHeight};try{const factor=await appWindow.scaleFactor();const pos=await appWindow.outerPosition();preExpandPos.current={x:Math.round(pos.x/factor),y:Math.round(pos.y/factor)}}catch(e){}const es=expandedSizeRef.current;await resizeWindow(es.w,es.h);setCollapsed(false);setShowOverflow(false);try{const factor=await appWindow.scaleFactor();const pos=await appWindow.outerPosition();const sw=window.screen.availWidth;const sh=window.screen.availHeight;const px=Math.round(pos.x/factor),py=Math.round(pos.y/factor);let nx=px,ny=py;if(px+es.w>sw)nx=Math.max(0,sw-es.w);if(py+es.h>sh)ny=Math.max(0,sh-es.h);if(nx!==px||ny!==py)await appWindow.setPosition(new LogicalPosition(nx,ny))}catch(e){}};
+  const collapsePanel=async()=>{expandedSizeRef.current={w:window.innerWidth,h:window.innerHeight};setCollapsed(true);const cs=collapsedSizeRef.current;await resizeWindow(cs.w,cs.h);if(preExpandPos.current){try{await getCurrentWindow().setPosition(new LogicalPosition(preExpandPos.current.x,preExpandPos.current.y))}catch(e){}preExpandPos.current=null}};
 
   const doArchive=()=>{const toA=tasks.filter(t=>t.status==="dn"||t.status==="na").map(t=>({...t,archivedAt:today()}));if(!toA.length)return;setArchived([...toA,...archived]);setTasks(tasks.filter(t=>t.status!=="dn"&&t.status!=="na"))};
   const restoreTask=id=>{const t=archived.find(a=>a.id===id);if(!t)return;const{archivedAt,...rest}=t;setTasks([...tasks,rest]);setArchived(archived.filter(a=>a.id!==id))};
 
   const handleStatusUpdate=u=>{const orig=tasks.find(t=>t.id===u.id);setTasks(tasks.map(t=>t.id===u.id?(orig&&orig.status!==u.status?applyStatusDates(u,u.status):u):t))};
 
-  // Proper drag reorder (insert, not swap)
+  // Drag reorder (insert) + drag across status groups to change status
   const handleDragEnd=()=>{
     if(dragFromId&&dragOverId&&dragFromId!==dragOverId){
       const ordered=[...tasks].sort((a,b)=>a.order-b.order);
       const fromIdx=ordered.findIndex(t=>t.id===dragFromId);
       const toIdx=ordered.findIndex(t=>t.id===dragOverId);
       if(fromIdx!==-1&&toIdx!==-1){
+        const targetStatus=ordered[toIdx].status;
         const[item]=ordered.splice(fromIdx,1);
+        if(item.status!==targetStatus)Object.assign(item,applyStatusDates(item,targetStatus));
         ordered.splice(toIdx,0,item);
         const updated=ordered.map((t,i)=>({...t,order:i}));
         setTasks(updated);
@@ -407,6 +454,7 @@ export default function TaskTracker(){
   // Export / Import
   const exportData=()=>{const data={tasks,archived,tags,statuses,settings,themeName,version:VER};const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`task-tracker-${today()}.json`;a.click();URL.revokeObjectURL(url)};
   const importData=data=>{if(data.tasks)setTasks(data.tasks);if(data.archived)setArchived(data.archived);if(data.tags)setTags(data.tags);if(data.statuses)setStatuses(data.statuses);if(data.settings)setSettings({...DEFAULT_SETTINGS,...data.settings});if(data.themeName)setThemeName(data.themeName)};
+  const handleSettingsChange=async nextSettings=>{if(nextSettings.autostart!==settings.autostart){if(nextSettings.autostart)await enable();else await disable()}setSettings(nextSettings)};
 
   const activeTasks=tasks.filter(t=>t.status==="ip").sort((a,b)=>a.order-b.order);
   const groupedTasks=statuses.map(s=>s.id).map(sid=>({status:getS(statuses,sid),tasks:tasks.filter(t=>t.status===sid&&(!filterTag||t.tags.includes(filterTag))).sort((a,b)=>a.order-b.order)})).filter(g=>g.tasks.length>0);
@@ -415,25 +463,25 @@ export default function TaskTracker(){
 
   const deleteTask=id=>setTasks(tasks.filter(t=>t.id!==id));
   const addTask=task=>setTasks([...tasks,task]);
+  const duplicateTask=t=>{const dup={...t,id:genId(),name:t.name+" (copy)",order:t.order+0.5,createdAt:today(),startedAt:"",completedAt:""};setTasks([...tasks,dup])};
 
   if(!loaded)return <div style={{padding:20,textAlign:"center",fontSize:13}}>Loading...</div>;
 
-  const cScale=cSize.w/260;const zBase=pinned?9999:1;const iconS=Math.max(10,12*cScale);
+  const cScale=winWidth/COLLAPSED_WINDOW.w;const iconS=Math.max(10,12*cScale);
   const shownActive=showOverflow?activeTasks:activeTasks.slice(0,settings.collapsedMax);const overC=activeTasks.length-settings.collapsedMax;
-  const autoH=cSize.h<51;const archivable=tasks.filter(t=>t.status==="dn"||t.status==="na").length;
+  const archivable=tasks.filter(t=>t.status==="dn"||t.status==="na").length;
 
   /* ── Minimized ── */
-  if(minimized){return(<div style={{position:"relative",minHeight:700,width:"100%"}}><div onClick={()=>setMinimized(false)} style={{position:"absolute",left:pos.x,top:pos.y,zIndex:zBase,width:36,height:36,background:theme.panelBorder,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",transition:"transform 0.15s"}} onMouseEnter={e=>e.currentTarget.style.transform="scale(1.1)"} onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}><svg width="18" height="18" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="2" stroke="#FFF" strokeWidth="1.3"/><path d="M5 7h6M5 9.5h4" stroke="#FFF" strokeWidth="1" strokeLinecap="round"/></svg>{activeTasks.length>0&&<div style={{position:"absolute",top:-4,right:-4,width:16,height:16,borderRadius:"50%",background:"#378ADD",color:"#FFF",fontSize:9,fontWeight:500,display:"flex",alignItems:"center",justifyContent:"center"}}>{activeTasks.length}</div>}</div></div>)}
+  if(minimized){return(<div style={{width:"100%",height:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}><div onClick={()=>setMinimized(false)} style={{width:36,height:36,background:theme.panelBorder,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",transition:"transform 0.15s",position:"relative"}} onMouseEnter={e=>e.currentTarget.style.transform="scale(1.1)"} onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}><svg width="18" height="18" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="2" stroke="#FFF" strokeWidth="1.3"/><path d="M5 7h6M5 9.5h4" stroke="#FFF" strokeWidth="1" strokeLinecap="round"/></svg>{activeTasks.length>0&&<div style={{position:"absolute",top:-4,right:-4,width:16,height:16,borderRadius:"50%",background:"#378ADD",color:"#FFF",fontSize:9,fontWeight:500,display:"flex",alignItems:"center",justifyContent:"center"}}>{activeTasks.length}</div>}</div></div>)}
 
   /* ── Collapsed ── */
   if(collapsed){return(
-    <div style={{position:"relative",minHeight:700,width:"100%"}}>
-      <div ref={panelRef} style={{position:"absolute",left:pos.x,top:pos.y,zIndex:zBase,width:cSize.w,height:autoH?"auto":cSize.h,background:theme.panelBg,border:`1.5px solid ${theme.panelBorder}`,borderRadius:14*Math.min(cScale,1.2),padding:`${11*cScale}px ${16*cScale}px`,userSelect:"none",overflow:"hidden"}}>
-        <ResizeHandles onResize={(e,d)=>doResize(e,d,140,500,50,400,cSize,setCSize)}/>
+      <div ref={panelRef} style={{width:"100%",height:"100vh",background:theme.panelBg,border:`1.5px solid ${theme.panelBorder}`,borderRadius:14*Math.min(cScale,1.2),padding:`${11*cScale}px ${16*cScale}px`,userSelect:"none",overflow:"hidden",position:"relative"}}>
+        <ResizeHandles/>
         <div style={{position:"absolute",top:0,left:0,right:0,height:Math.max(2,3*cScale),background:activeTasks.length>0?`linear-gradient(90deg,${theme.accentLeft},${theme.accentLeft}60)`:theme.divider}}/>
         <div style={{position:"absolute",top:Math.max(4,6*cScale),right:Math.max(6,8*cScale),display:"flex",gap:Math.max(2,4*cScale),zIndex:12}}>
-          <span data-no-drag onClick={e=>{e.stopPropagation();setPinned(!pinned)}} style={{width:iconS+6,height:iconS+6,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:4,background:pinned?theme.panelBorder+"20":"transparent"}} onMouseEnter={e=>{if(!pinned)e.currentTarget.style.background=theme.panelBorder+"10"}} onMouseLeave={e=>{e.currentTarget.style.background=pinned?theme.panelBorder+"20":"transparent"}}><svg width={iconS} height={iconS} viewBox="0 0 16 16" fill="none" stroke={pinned?theme.panelBorder:theme.headerText} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" style={{opacity:pinned?1:0.5,transform:pinned?"rotate(0deg)":"rotate(45deg)",transition:"transform 0.2s"}}><path d="M5 2L11 2L12 7L10 9L10 14L6 14L6 9L4 7Z" fill={pinned?theme.panelBorder+"30":"none"}/></svg></span>
-          <span data-no-drag onClick={e=>{e.stopPropagation();setMinimized(true)}} style={{width:iconS+6,height:iconS+6,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:4}} onMouseEnter={e=>e.currentTarget.style.background=theme.panelBorder+"10"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}><svg width={iconS} height={iconS} viewBox="0 0 16 16" fill="none" stroke={theme.headerText} strokeWidth="1.3" strokeLinecap="round" style={{opacity:0.5}}><path d="M4 4L12 12M12 4L4 12"/></svg></span>
+          <span data-no-drag onClick={async e=>{e.stopPropagation();const nextPinned=!pinned;setPinned(nextPinned);await getCurrentWindow().setAlwaysOnTop(nextPinned)}} style={{width:iconS+6,height:iconS+6,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:4,background:pinned?theme.panelBorder+"20":"transparent"}} onMouseEnter={e=>{if(!pinned)e.currentTarget.style.background=theme.panelBorder+"10"}} onMouseLeave={e=>{e.currentTarget.style.background=pinned?theme.panelBorder+"20":"transparent"}}><svg width={iconS} height={iconS} viewBox="0 0 16 16" fill="none" stroke={pinned?theme.panelBorder:theme.headerText} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" style={{opacity:pinned?1:0.5,transform:pinned?"rotate(0deg)":"rotate(45deg)",transition:"transform 0.2s"}}><path d="M5 2L11 2L12 7L10 9L10 14L6 14L6 9L4 7Z" fill={pinned?theme.panelBorder+"30":"none"}/></svg></span>
+          <span data-no-drag onClick={async e=>{e.stopPropagation();await getCurrentWindow().hide()}} style={{width:iconS+6,height:iconS+6,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:4}} onMouseEnter={e=>e.currentTarget.style.background=theme.panelBorder+"10"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}><svg width={iconS} height={iconS} viewBox="0 0 16 16" fill="none" stroke={theme.headerText} strokeWidth="1.3" strokeLinecap="round" style={{opacity:0.5}}><path d="M4 4L12 12M12 4L4 12"/></svg></span>
         </div>
         <div onMouseDown={e=>startMove(e,expandPanel)} style={{cursor:"grab"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:activeTasks.length>0?8*cScale:0}}>
@@ -441,17 +489,16 @@ export default function TaskTracker(){
             <span style={{fontSize:10*cScale,color:theme.headerText,opacity:0.6,marginRight:(iconS+6)*2+8}}>{tasks.length} total</span>
           </div>
           {shownActive.map(t=>(<div key={t.id} style={{fontSize:12*cScale,padding:`${3*cScale}px 0`,display:"flex",alignItems:"center",gap:7*cScale,color:theme.headerText}}><div style={{width:4*cScale,height:4*cScale,borderRadius:"50%",background:theme.divider,flexShrink:0}}/><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</span></div>))}
-          {overC>0&&<div data-no-drag onClick={e=>{e.stopPropagation();setShowOverflow(!showOverflow)}} style={{fontSize:14*cScale,color:theme.accentLeft,cursor:"pointer",padding:`${2*cScale}px 0`,textAlign:"center",opacity:0.7,letterSpacing:3,lineHeight:1}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.7"}>···</div>}
+          {overC>0&&!showOverflow&&<div data-no-drag onClick={async e=>{e.stopPropagation();preOverflowH.current=window.innerHeight;const extraRows=overC;const rowH=Math.round(18*cScale);setShowOverflow(true);await resizeWindow(window.innerWidth,window.innerHeight+extraRows*rowH)}} style={{fontSize:14*cScale,color:theme.accentLeft,cursor:"pointer",padding:`${2*cScale}px 0`,textAlign:"center",opacity:0.7,letterSpacing:3,lineHeight:1}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.7"}>···</div>}
+          {showOverflow&&<div data-no-drag onClick={async e=>{e.stopPropagation();setShowOverflow(false);const h=preOverflowH.current||collapsedSizeRef.current.h;preOverflowH.current=null;await resizeWindow(window.innerWidth,h)}} style={{fontSize:11*cScale,color:theme.accentLeft,cursor:"pointer",padding:`${2*cScale}px 0`,textAlign:"center",opacity:0.7}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.7"}>▲</div>}
         </div>
       </div>
-    </div>
   )}
 
   /* ── Expanded ── */
   return(
-    <div style={{position:"relative",minHeight:700,width:"100%"}}>
-      <div ref={panelRef} style={{position:"absolute",left:pos.x,top:pos.y,zIndex:zBase,width:size.w,height:size.h,background:theme.panelBg,border:`1.5px solid ${theme.panelBorder}`,borderRadius:14,display:"flex",flexDirection:"column",overflow:"hidden",userSelect:"none"}}>
-        <ResizeHandles onResize={(e,d)=>doResize(e,d,260,800,300,900,size,setSize)}/>
+      <div ref={panelRef} style={{width:"100%",height:"100vh",background:theme.panelBg,border:`1.5px solid ${theme.panelBorder}`,borderRadius:14,display:"flex",flexDirection:"column",overflow:"hidden",userSelect:"none"}}>
+        <ResizeHandles/>
         <div style={{position:"absolute",top:0,left:0,right:0,height:3,zIndex:5,background:`linear-gradient(90deg,${theme.accentLeft},${theme.accentRight}80)`}}/>
         {showSearch&&<SearchOverlay tasks={tasks} archived={archived} allTags={tags} statuses={statuses} theme={theme} onClose={()=>setShowSearch(false)}/>}
 
@@ -462,9 +509,14 @@ export default function TaskTracker(){
             <span style={{fontSize:11,color:theme.headerText,opacity:0.5}}>{tasks.length}</span>
             <svg width="10" height="10" viewBox="0 0 10 10" style={{color:theme.headerText,opacity:0.5}}><path d="M7.5 3.5L5 1.5L2.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/><path d="M7.5 7L5 5L2.5 7" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
           </div>
-          <span data-no-drag onClick={()=>setShowSearch(true)} style={{cursor:"pointer",padding:"2px 6px",borderRadius:6,display:"flex",alignItems:"center",opacity:0.5}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.5"}>
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke={theme.headerText} strokeWidth="1.5" strokeLinecap="round"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4 4"/></svg>
-          </span>
+          <div style={{display:"flex",alignItems:"center",gap:2}}>
+            <span data-no-drag onClick={()=>window.location.reload()} style={{cursor:"pointer",padding:"2px 6px",borderRadius:6,display:"flex",alignItems:"center",opacity:0.4}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.4"}>
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke={theme.headerText} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 8a6 6 0 0111.5-2.5M14 2v3.5h-3.5"/><path d="M14 8a6 6 0 01-11.5 2.5M2 14v-3.5h3.5"/></svg>
+            </span>
+            <span data-no-drag onClick={()=>setShowSearch(true)} style={{cursor:"pointer",padding:"2px 6px",borderRadius:6,display:"flex",alignItems:"center",opacity:0.5}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.5"}>
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke={theme.headerText} strokeWidth="1.5" strokeLinecap="round"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4 4"/></svg>
+            </span>
+          </div>
         </div>
 
         {/* Filter */}
@@ -478,26 +530,26 @@ export default function TaskTracker(){
           {!showArchive?groupedTasks.map(group=>(
             <div key={group.status.id} style={{marginBottom:12}}>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,padding:"0 2px"}}><div style={{width:6,height:6,borderRadius:"50%",background:group.status.color,flexShrink:0}}/><span style={{fontSize:11,color:theme.textSecondary,textTransform:"uppercase",letterSpacing:"0.5px",fontWeight:500}}>{group.status.name}</span><span style={{fontSize:10,color:theme.textSecondary,opacity:0.5}}>{group.tasks.length}</span></div>
-              {group.tasks.map(task=><TaskCard key={task.id} task={task} allTags={tags} statuses={statuses} theme={theme} onUpdate={handleStatusUpdate} onDelete={deleteTask} isDragOver={dragOverId===task.id} onDragStart={setDragFromId} onDragEnter={setDragOverId} onDragEnd={handleDragEnd}/>)}
+              {group.tasks.map(task=><TaskCard key={task.id} task={task} allTags={tags} statuses={statuses} theme={theme} onUpdate={handleStatusUpdate} onDelete={deleteTask} onDuplicate={duplicateTask} isDragOver={dragOverId===task.id} onDragStart={setDragFromId} onDragEnter={setDragOverId} onDragEnd={handleDragEnd}/>)}
             </div>
           )):(
             <><div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}><span style={{fontSize:13,fontWeight:500,color:theme.headerText}}>Archived</span><span style={{fontSize:11,color:theme.textSecondary}}>{archived.length}</span></div>
             {archived.length===0&&<p style={{fontSize:12,color:theme.textSecondary,fontStyle:"italic",opacity:0.6}}>No archived tasks</p>}
             {archivedByWeek.map(g=><div key={g.week} style={{marginBottom:12}}><div style={{fontSize:10,color:theme.textSecondary,opacity:0.5,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.5px",fontWeight:500}}>Week of {g.week}</div>{g.tasks.map(t=><ArchiveCard key={t.id} task={t} allTags={tags} statuses={statuses} onRestore={restoreTask} theme={theme}/>)}</div>)}</>
           )}
+          {addingTask&&!showArchive&&<AddTaskForm allTags={tags} statuses={statuses} onAdd={addTask} onCancel={()=>setAddingTask(false)} theme={theme} defaultStatus={settings.defaultStatus}/>}
         </div>
 
         {/* Settings */}
-        {showSettings&&<div data-no-drag style={{padding:"0 14px 8px",flexShrink:0,borderTop:`1px solid ${theme.divider}`,maxHeight:300,overflowY:"auto"}}><SettingsPanel theme={theme} themeName={themeName} onThemeChange={setThemeName} statuses={statuses} onStatusesChange={setStatuses} tags={tags} onTagsChange={setTags} settings={settings} onSettingsChange={setSettings} onExport={exportData} onImport={importData}/></div>}
+        {showSettings&&<div data-no-drag style={{padding:"0 14px 8px",flexShrink:0,borderTop:`1px solid ${theme.divider}`,maxHeight:300,overflowY:"auto"}}><SettingsPanel theme={theme} themeName={themeName} onThemeChange={setThemeName} statuses={statuses} onStatusesChange={setStatuses} tags={tags} onTagsChange={setTags} settings={settings} onSettingsChange={handleSettingsChange} onExport={exportData} onImport={importData}/></div>}
 
         {/* Bottom */}
         <div data-no-drag style={{padding:"8px 14px 12px",flexShrink:0,borderTop:`1px solid ${theme.divider}`,background:theme.panelBg,display:"flex",gap:6,alignItems:"stretch"}}>
           <button onClick={()=>{setShowSettings(!showSettings);setShowArchive(false)}} style={{padding:"0 8px",borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${showSettings?theme.panelBorder:theme.newTaskBorder}`,background:showSettings?theme.panelBorder+"15":theme.btnBg,color:showSettings?theme.panelBorder:theme.headerText,display:"flex",alignItems:"center",justifyContent:"center"}}><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.1 3.1l1.4 1.4M11.5 11.5l1.4 1.4M3.1 12.9l1.4-1.4M11.5 4.5l1.4-1.4"/></svg></button>
           <button onClick={()=>{setShowArchive(!showArchive);setShowSettings(false)}} style={{padding:"0 8px",borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${showArchive?theme.panelBorder:theme.newTaskBorder}`,background:showArchive?theme.panelBorder+"15":theme.btnBg,color:showArchive?theme.panelBorder:theme.headerText,display:"flex",alignItems:"center",justifyContent:"center",gap:3}}><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="2" width="12" height="4" rx="1"/><path d="M2 6v7a1 1 0 001 1h10a1 1 0 001-1V6"/><path d="M6 9h4"/></svg>{archived.length>0&&<span style={{fontSize:9,opacity:0.6}}>{archived.length}</span>}</button>
           {!showArchive&&archivable>0&&<button onClick={doArchive} style={{padding:"0 10px",borderRadius:10,cursor:"pointer",flexShrink:0,border:`1px solid ${theme.newTaskBorder}`,background:theme.btnBg,color:theme.headerText,display:"flex",alignItems:"center",gap:4,fontSize:11}} onMouseEnter={e=>e.currentTarget.style.borderColor=theme.panelBorder} onMouseLeave={e=>e.currentTarget.style.borderColor=theme.newTaskBorder}>Archive {archivable}</button>}
-          <div style={{flex:1}}>{!showArchive&&<AddTaskInline allTags={tags} statuses={statuses} onAdd={addTask} theme={theme} defaultStatus={settings.defaultStatus}/>}</div>
+          {!showArchive&&<button onClick={()=>setAddingTask(!addingTask)} style={{flex:1,padding:"0",borderRadius:10,cursor:"pointer",border:`1px ${addingTask?"solid":"dashed"} ${addingTask?theme.panelBorder:theme.newTaskBorder}`,background:addingTask?theme.panelBorder+"15":"none",color:addingTask?theme.panelBorder:theme.headerText,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center"}} onMouseEnter={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.panelBorder}} onMouseLeave={e=>{if(!addingTask)e.currentTarget.style.borderColor=theme.newTaskBorder}}>+ New</button>}
         </div>
       </div>
-    </div>
   );
 }
